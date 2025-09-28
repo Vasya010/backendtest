@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const port = 3000;
 
-// Middleware для обработки JSON
+// Middleware для обработки JSON1
 app.use(express.json());
 
 // Пример маршрута
