@@ -458,7 +458,7 @@ function initializeServer(callback) {
           });
         }
         function createAdminUser() {
-          connection.query('SELECT * FROM users WHERE email = ?', ['admin@boodaypizza.com'], (err, users) => {
+          connection.query('SELECT * FROM users WHERE email = ?', ['admin@ameranpizza.com'], (err, users) => {
             if (err) {
               connection.release();
               return callback(err);
@@ -471,7 +471,7 @@ function initializeServer(callback) {
                 }
                 connection.query(
                   'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-                  ['Admin', 'admin@boodaypizza.com', hashedPassword],
+                  ['Admin', 'admin@ameranpizza.com', hashedPassword],
                   (err) => {
                     if (err) {
                       connection.release();
