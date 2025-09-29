@@ -12,21 +12,33 @@ require('dotenv').config();
 
 const app = express();
 
+const allowedOrigins = [
+  "https://americanpizzakg.com",
+  "https://vasya010-backendtest-260b.twc1.net"
+];
 
 app.use(cors({
-  origin: "*", // разрешить всем
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: false // ⚠️ если true, нельзя использовать "*" в origin
+  credentials: true
 }));
 
-// Preflight
+// Обработка preflight (Express 5 требует /* вместо *)
 app.options("/*", (req, res) => {
-  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Origin", req.headers.origin);
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Credentials", "true");
   res.sendStatus(200);
 });
+
 
 
 app.use(express.json());
