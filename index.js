@@ -14,8 +14,8 @@ const app = express();
 
 const allowedOrigins = [
   "http://localhost:3000",
-  "https://americanpizzakg.com",
-  "https://vasya010-backendtest-260b.twc1.net"
+  "americanpizzakg.com",
+  "vasya010-backendtest-260b.twc1.net"
 ];
 
 app.use(cors({
