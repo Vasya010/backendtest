@@ -8,7 +8,7 @@ const port = 3000;
 
 // Middleware
 app.use(express.json());
-app.use(cors()); // Enable CORS for React frontend
+app.use(cors()); // Enable CORS for React frontend1
 
 // MySQL connection configuration
 const dbConfig = {
