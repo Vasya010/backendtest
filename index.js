@@ -12,27 +12,23 @@ require('dotenv').config();
 
 const app = express();
 
-const allowedOrigins = [
-  "http://localhost:3000",
-  "https://americanpizzakg.com",
-  "https://vasya010-backendtest-260b.twc1.net"
-];
-
+// Разрешить CORS для всех источников
 app.use(cors({
-  origin: allowedOrigins,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true
+  origin: '*', // Разрешает запросы от любого источника
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true // Если нужны куки или авторизация
 }));
 
-// ВАЖНО: явно обрабатывать preflight
-app.options("*", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
+// Обработка preflight-запросов (OPTIONS)
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.sendStatus(200);
 });
+
 
 
 
