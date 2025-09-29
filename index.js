@@ -33,7 +33,7 @@ app.options("*", (req, res) => {
   res.sendStatus(200);
 });
 
-app.options("*", cors());
+
 
 app.use(express.json());
 
