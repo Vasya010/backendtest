@@ -15,7 +15,7 @@ app.use(cors());
 app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key_very_secure_random_string';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7858016810:AAELHxlmZORP7iHEIWdqYKw-rHl-q3aB8yY';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7639223015:AAGdo2oB_uL4pEqXTnnepR4IpwsTSh2_UyY';
 const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || 'GIMZKRMOGP4F0MOTLVCE';
 const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'WvhFfIzzCkITUrXfD8JfoDne7LmBhnNzDuDBj89I';
 const MYSQL_HOST = process.env.MYSQL_HOST || 'vh446.timeweb.ru';
@@ -198,8 +198,8 @@ function initializeServer(callback) {
                   });
                 } else {
                   const updateQueries = [
-                    ['BOODAI PIZZA', '-1002311447135'],
-                    ['Район', '-1002638475628'],
+                   
+                    ['american_pizza.osh', '-1003140309410'],
                     ['Араванский', '-1002311447135'],
                     ['Ошский район', '-1002638475628'],
                   ];
