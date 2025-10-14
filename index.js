@@ -198,7 +198,6 @@ function initializeServer(callback) {
                   });
                 } else {
                   const updateQueries = [
-                   
                     ['american_pizza.osh', '-1003140309410'],
                     ['Араванский', '-1002311447135'],
                     ['Ошский район', '-1002638475628'],
@@ -592,7 +591,7 @@ app.post('/api/public/validate-promo', (req, res) => {
 });
 
 app.post('/api/public/send-order', (req, res) => {
-  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod } = req.body;
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: 'Корзина пуста или содержит некорректные данные' });
   }
@@ -612,6 +611,7 @@ app.post('/api/public/send-order', (req, res) => {
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
+    const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
     const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
@@ -619,6 +619,7 @@ app.post('/api/public/send-order', (req, res) => {
 📞 Телефон: ${escapeMarkdown(orderDetails.phone || deliveryDetails.phone)}
 📝 Комментарии: ${escapeMarkdown(orderDetails.comments || deliveryDetails.comments || "Нет")}
 📍 Адрес доставки: ${escapeMarkdown(deliveryDetails.address || "Самовывоз")}
+💳 Способ оплаты: ${escapeMarkdown(paymentMethodText)}
 🛒 *Товары:*
 ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт. по ${item.originalPrice} сом)`).join('\n')}
 💰 Итоговая стоимость: ${total.toFixed(2)} сом
@@ -1139,8 +1140,7 @@ app.put('/products/:id', authenticateToken, (req, res) => {
                 fetchUpdatedProduct();
               }
             });
-          }
-        );
+          });
       }
       function fetchUpdatedProduct() {
         db.query(
