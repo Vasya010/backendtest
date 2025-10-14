@@ -23,6 +23,9 @@ const MYSQL_USER = process.env.MYSQL_USER || 'cz45780_pizzaame';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'Vasya11091109';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'cz45780_pizzaame';
 
+
+const SECOND_BRANCH_ID = 8; // ID второго филиала
+
 const s3Client = new S3Client({
   credentials: {
     accessKeyId: S3_ACCESS_KEY,
@@ -969,127 +972,14 @@ app.post('/products', authenticateToken, (req, res) => {
       if (!name || !branchId || !categoryId || !imageKey) {
         return res.status(400).json({ error: 'Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)' });
       }
-      db.query(
-        `INSERT INTO products (
-          name, description, price_small, price_medium, price_large, price_single,
-          branch_id, category_id, sub_category_id, image
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          name,
-          description || null,
-          priceSmall ? parseFloat(priceSmall) : null,
-          priceMedium ? parseFloat(priceMedium) : null,
-          priceLarge ? parseFloat(priceLarge) : null,
-          priceSingle ? parseFloat(priceSingle) : null,
-          branchId,
-          categoryId,
-          subCategoryId || null,
-          imageKey,
-        ],
-        (err, result) => {
-          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-          if (sauceIds) {
-            let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
-            if (!Array.isArray(sauceIdsArray)) {
-              return res.status(400).json({ error: 'sauceIds должен быть массивом' });
-            }
-            let sauceInsertions = 0;
-            if (sauceIdsArray.length === 0) {
-              fetchNewProduct();
-            } else {
-              sauceIdsArray.forEach(sauceId => {
-                db.query('SELECT id FROM sauces WHERE id = ?', [sauceId], (err, sauce) => {
-                  if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-                  if (sauce.length === 0) {
-                    sauceInsertions++;
-                    if (sauceInsertions === sauceIdsArray.length) fetchNewProduct();
-                    return;
-                  }
-                  db.query(
-                    'INSERT INTO products_sauces (product_id, sauce_id) VALUES (?, ?)',
-                    [result.insertId, sauceId],
-                    (err) => {
-                      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-                      sauceInsertions++;
-                      if (sauceInsertions === sauceIdsArray.length) fetchNewProduct();
-                    }
-                  );
-                });
-              });
-            }
-          } else {
-            fetchNewProduct();
-          }
-          function fetchNewProduct() {
-            db.query(
-              `
-              SELECT p.*,
-                     b.name as branch_name,
-                     c.name as category_name,
-                     s.name as subcategory_name,
-                     COALESCE(
-                       (SELECT JSON_ARRAYAGG(
-                         JSON_OBJECT(
-                           'id', sa.id,
-                           'name', sa.name,
-                           'price', sa.price,
-                           'image', sa.image
-                         )
-                       )
-                       FROM products_sauces ps
-                       LEFT JOIN sauces sa ON ps.sauce_id = sa.id
-                       WHERE ps.product_id = p.id AND sa.id IS NOT NULL),
-                       '[]'
-                     ) as sauces
-              FROM products p
-              LEFT JOIN branches b ON p.branch_id = b.id
-              LEFT JOIN categories c ON p.category_id = c.id
-              LEFT JOIN subcategories s ON p.sub_category_id = s.id
-              WHERE p.id = ?
-              GROUP BY p.id
-            `,
-              [result.insertId],
-              (err, newProduct) => {
-                if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-                res.status(201).json({
-                  ...newProduct[0],
-                  sauces: newProduct[0].sauces ? JSON.parse(newProduct[0].sauces).filter(s => s.id) : []
-                });
-              }
-            );
-          }
-        }
-      );
-    });
-  });
-});
 
-app.put('/products/:id', authenticateToken, (req, res) => {
-  upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
-    const { id } = req.params;
-    const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, sauceIds } = req.body;
-    let imageKey;
-    db.query('SELECT image FROM products WHERE id = ?', [id], (err, existing) => {
-      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-      if (existing.length === 0) return res.status(404).json({ error: 'Продукт не найден' });
-      if (req.file) {
-        uploadToS3(req.file, (err, key) => {
-          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
-          imageKey = key;
-          if (existing[0].image) deleteFromS3(existing[0].image, updateProduct);
-          else updateProduct();
-        });
-      } else {
-        imageKey = existing[0].image;
-        updateProduct();
-      }
-      function updateProduct() {
+      // Функция для создания продукта
+      function createProduct(branchId, callback) {
         db.query(
-          `UPDATE products SET
-            name = ?, description = ?, price_small = ?, price_medium = ?, price_large = ?,
-            price_single = ?, branch_id = ?, category_id = ?, sub_category_id = ?, image = ?
-          WHERE id = ?`,
+          `INSERT INTO products (
+            name, description, price_small, price_medium, price_large, price_single,
+            branch_id, category_id, sub_category_id, image
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             name,
             description || null,
@@ -1101,84 +991,290 @@ app.put('/products/:id', authenticateToken, (req, res) => {
             categoryId,
             subCategoryId || null,
             imageKey,
-            id,
           ],
-          (err) => {
-            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-            db.query('DELETE FROM products_sauces WHERE product_id = ?', [id], (err) => {
-              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-              if (sauceIds) {
-                let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
-                if (!Array.isArray(sauceIdsArray)) {
-                  return res.status(400).json({ error: 'sauceIds должен быть массивом' });
-                }
-                let sauceInsertions = 0;
-                if (sauceIdsArray.length === 0) {
-                  fetchUpdatedProduct();
-                } else {
-                  sauceIdsArray.forEach(sauceId => {
-                    db.query('SELECT id FROM sauces WHERE id = ?', [sauceId], (err, sauce) => {
-                      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-                      if (sauce.length === 0) {
-                        sauceInsertions++;
-                        if (sauceInsertions === sauceIdsArray.length) fetchUpdatedProduct();
-                        return;
-                      }
-                      db.query(
-                        'INSERT INTO products_sauces (product_id, sauce_id) VALUES (?, ?)',
-                        [id, sauceId],
-                        (err) => {
-                          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-                          sauceInsertions++;
-                          if (sauceInsertions === sauceIdsArray.length) fetchUpdatedProduct();
-                        }
-                      );
-                    });
-                  });
-                }
-              } else {
-                fetchUpdatedProduct();
-              }
-            });
-          });
-      }
-      function fetchUpdatedProduct() {
-        db.query(
-          `
-          SELECT p.*,
-                 b.name as branch_name,
-                 c.name as category_name,
-                 s.name as subcategory_name,
-                 COALESCE(
-                   (SELECT JSON_ARRAYAGG(
-                     JSON_OBJECT(
-                       'id', sa.id,
-                       'name', sa.name,
-                       'price', sa.price,
-                       'image', sa.image
-                     )
-                   )
-                   FROM products_sauces ps
-                   LEFT JOIN sauces sa ON ps.sauce_id = sa.id
-                   WHERE ps.product_id = p.id AND sa.id IS NOT NULL),
-                   '[]'
-                 ) as sauces
-          FROM products p
-          LEFT JOIN branches b ON p.branch_id = b.id
-          LEFT JOIN categories c ON p.category_id = c.id
-          LEFT JOIN subcategories s ON p.sub_category_id = s.id
-          WHERE p.id = ?
-          GROUP BY p.id
-        `,
-          [id],
-          (err, updatedProduct) => {
-            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-            res.json({
-              ...updatedProduct[0],
-              sauces: updatedProduct[0].sauces ? JSON.parse(updatedProduct[0].sauces).filter(s => s.id) : []
-            });
+          (err, result) => {
+            if (err) return callback(err);
+            callback(null, result.insertId);
           }
         );
+      }
+
+      // Функция для привязки соусов
+      function attachSauces(productId, sauceIdsArray, callback) {
+        if (!sauceIdsArray || sauceIdsArray.length === 0) return callback(null);
+        let sauceInsertions = 0;
+        sauceIdsArray.forEach(sauceId => {
+          db.query('SELECT id FROM sauces WHERE id = ?', [sauceId], (err, sauce) => {
+            if (err) return callback(err);
+            if (sauce.length === 0) {
+              sauceInsertions++;
+              if (sauceInsertions === sauceIdsArray.length) callback(null);
+              return;
+            }
+            db.query(
+              'INSERT INTO products_sauces (product_id, sauce_id) VALUES (?, ?)',
+              [productId, sauceId],
+              (err) => {
+                if (err) return callback(err);
+                sauceInsertions++;
+                if (sauceInsertions === sauceIdsArray.length) callback(null);
+              }
+            );
+          });
+        });
+      }
+
+      // Создание продукта для основного филиала
+      createProduct(branchId, (err, productId) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+
+        // Создание продукта для второго филиала (ID = 8)
+        createProduct(SECOND_BRANCH_ID, (err, secondProductId) => {
+          if (err) return res.status(500).json({ error: `Ошибка создания продукта для второго филиала: ${err.message}` });
+
+          // Привязка соусов
+          let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
+          if (!Array.isArray(sauceIdsArray)) {
+            return res.status(400).json({ error: 'sauceIds должен быть массивом' });
+          }
+
+          attachSauces(productId, sauceIdsArray, (err) => {
+            if (err) return res.status(500).json({ error: `Ошибка привязки соусов: ${err.message}` });
+            attachSauces(secondProductId, sauceIdsArray, (err) => {
+              if (err) return res.status(500).json({ error: `Ошибка привязки соусов для второго филиала: ${err.message}` });
+
+              // Получение созданного продукта
+              db.query(
+                `
+                SELECT p.*,
+                       b.name as branch_name,
+                       c.name as category_name,
+                       s.name as subcategory_name,
+                       COALESCE(
+                         (SELECT JSON_ARRAYAGG(
+                           JSON_OBJECT(
+                             'id', sa.id,
+                             'name', sa.name,
+                             'price', sa.price,
+                             'image', sa.image
+                           )
+                         )
+                         FROM products_sauces ps
+                         LEFT JOIN sauces sa ON ps.sauce_id = sa.id
+                         WHERE ps.product_id = p.id AND sa.id IS NOT NULL),
+                         '[]'
+                       ) as sauces
+                FROM products p
+                LEFT JOIN branches b ON p.branch_id = b.id
+                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN subcategories s ON p.sub_category_id = s.id
+                WHERE p.id = ?
+                GROUP BY p.id
+              `,
+                [productId],
+                (err, newProduct) => {
+                  if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+                  res.status(201).json({
+                    ...newProduct[0],
+                    sauces: newProduct[0].sauces ? JSON.parse(newProduct[0].sauces).filter(s => s.id) : []
+                  });
+                }
+              );
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+app.put('/products/:id', authenticateToken, (req, res) => {
+  upload(req, res, (err) => {
+    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    const { id } = req.params;
+    const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, sauceIds } = req.body;
+    let imageKey;
+
+    // Поиск продукта в исходном филиале
+    db.query('SELECT image FROM products WHERE id = ?', [id], (err, existing) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (existing.length === 0) return res.status(404).json({ error: 'Продукт не найден' });
+
+      // Загрузка нового изображения, если оно есть
+      if (req.file) {
+        uploadToS3(req.file, (err, key) => {
+          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          imageKey = key;
+          if (existing[0].image) deleteFromS3(existing[0].image, updateProduct);
+          else updateProduct();
+        });
+      } else {
+        imageKey = existing[0].image;
+        updateProduct();
+      }
+
+      function updateProduct() {
+        // Функция для обновления продукта
+        function updateSingleProduct(productId, branchId, callback) {
+          db.query(
+            `UPDATE products SET
+              name = ?, description = ?, price_small = ?, price_medium = ?, price_large = ?,
+              price_single = ?, branch_id = ?, category_id = ?, sub_category_id = ?, image = ?
+            WHERE id = ?`,
+            [
+              name,
+              description || null,
+              priceSmall ? parseFloat(priceSmall) : null,
+              priceMedium ? parseFloat(priceMedium) : null,
+              priceLarge ? parseFloat(priceLarge) : null,
+              priceSingle ? parseFloat(priceSingle) : null,
+              branchId,
+              categoryId,
+              subCategoryId || null,
+              imageKey,
+              productId,
+            ],
+            (err) => {
+              if (err) return callback(err);
+              callback(null);
+            }
+          );
+        }
+
+        // Функция для обновления соусов
+        function updateSauces(productId, sauceIdsArray, callback) {
+          db.query('DELETE FROM products_sauces WHERE product_id = ?', [productId], (err) => {
+            if (err) return callback(err);
+            if (!sauceIdsArray || sauceIdsArray.length === 0) return callback(null);
+            let sauceInsertions = 0;
+            sauceIdsArray.forEach(sauceId => {
+              db.query('SELECT id FROM sauces WHERE id = ?', [sauceId], (err, sauce) => {
+                if (err) return callback(err);
+                if (sauce.length === 0) {
+                  sauceInsertions++;
+                  if (sauceInsertions === sauceIdsArray.length) callback(null);
+                  return;
+                }
+                db.query(
+                  'INSERT INTO products_sauces (product_id, sauce_id) VALUES (?, ?)',
+                  [productId, sauceId],
+                  (err) => {
+                    if (err) return callback(err);
+                    sauceInsertions++;
+                    if (sauceInsertions === sauceIdsArray.length) callback(null);
+                  }
+                );
+              });
+            });
+          });
+        }
+
+        // Обновление продукта в исходном филиале
+        updateSingleProduct(id, branchId, (err) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+
+          // Поиск продукта во втором филиале (ID = 8)
+          db.query(
+            'SELECT id FROM products WHERE name = ? AND branch_id = ? AND id != ?',
+            [name, SECOND_BRANCH_ID, id],
+            (err, secondProduct) => {
+              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+              let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
+              if (!Array.isArray(sauceIdsArray)) {
+                return res.status(400).json({ error: 'sauceIds должен быть массивом' });
+              }
+
+              if (secondProduct.length > 0) {
+                // Обновление существующего продукта во втором филиале
+                updateSingleProduct(secondProduct[0].id, SECOND_BRANCH_ID, (err) => {
+                  if (err) return res.status(500).json({ error: `Ошибка обновления продукта во втором филиале: ${err.message}` });
+                  updateSauces(secondProduct[0].id, sauceIdsArray, (err) => {
+                    if (err) return res.status(500).json({ error: `Ошибка обновления соусов для второго филиала: ${err.message}` });
+                    fetchUpdatedProduct();
+                  });
+                });
+              } else {
+                // Создание нового продукта во втором филиале
+                createProduct(SECOND_BRANCH_ID, (err, secondProductId) => {
+                  if (err) return res.status(500).json({ error: `Ошибка создания продукта для второго филиала: ${err.message}` });
+                  updateSauces(secondProductId, sauceIdsArray, (err) => {
+                    if (err) return res.status(500).json({ error: `Ошибка обновления соусов для второго филиала: ${err.message}` });
+                    fetchUpdatedProduct();
+                  });
+                });
+              }
+
+              // Обновление соусов для исходного продукта
+              updateSauces(id, sauceIdsArray, (err) => {
+                if (err) return res.status(500).json({ error: `Ошибка обновления соусов: ${err.message}` });
+              });
+            }
+          );
+        });
+
+        function createProduct(branchId, callback) {
+          db.query(
+            `INSERT INTO products (
+              name, description, price_small, price_medium, price_large, price_single,
+              branch_id, category_id, sub_category_id, image
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              name,
+              description || null,
+              priceSmall ? parseFloat(priceSmall) : null,
+              priceMedium ? parseFloat(priceMedium) : null,
+              priceLarge ? parseFloat(priceLarge) : null,
+              priceSingle ? parseFloat(priceSingle) : null,
+              branchId,
+              categoryId,
+              subCategoryId || null,
+              imageKey,
+            ],
+            (err, result) => {
+              if (err) return callback(err);
+              callback(null, result.insertId);
+            }
+          );
+        }
+
+        function fetchUpdatedProduct() {
+          db.query(
+            `
+            SELECT p.*,
+                   b.name as branch_name,
+                   c.name as category_name,
+                   s.name as subcategory_name,
+                   COALESCE(
+                     (SELECT JSON_ARRAYAGG(
+                       JSON_OBJECT(
+                         'id', sa.id,
+                         'name', sa.name,
+                         'price', sa.price,
+                         'image', sa.image
+                       )
+                     )
+                     FROM products_sauces ps
+                     LEFT JOIN sauces sa ON ps.sauce_id = sa.id
+                     WHERE ps.product_id = p.id AND sa.id IS NOT NULL),
+                     '[]'
+                   ) as sauces
+            FROM products p
+            LEFT JOIN branches b ON p.branch_id = b.id
+            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN subcategories s ON p.sub_category_id = s.id
+            WHERE p.id = ?
+            GROUP BY p.id
+          `,
+            [id],
+            (err, updatedProduct) => {
+              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+              res.json({
+                ...updatedProduct[0],
+                sauces: updatedProduct[0].sauces ? JSON.parse(updatedProduct[0].sauces).filter(s => s.id) : []
+              });
+            }
+          );
+        }
       }
     });
   });
@@ -1186,17 +1282,59 @@ app.put('/products/:id', authenticateToken, (req, res) => {
 
 app.delete('/products/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
-  db.query('SELECT image FROM products WHERE id = ?', [id], (err, product) => {
+  db.query('SELECT image, name, branch_id FROM products WHERE id = ?', [id], (err, product) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     if (product.length === 0) return res.status(404).json({ error: 'Продукт не найден' });
-    if (product[0].image) deleteFromS3(product[0].image, deleteProduct);
-    else deleteProduct();
-    function deleteProduct() {
-      db.query('DELETE FROM products WHERE id = ?', [id], (err) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-        res.json({ message: 'Продукт удален' });
+    const productName = product[0].name;
+    const branchId = product[0].branch_id;
+
+    // Удаление изображения из S3
+    function deleteImage(callback) {
+      if (product[0].image) deleteFromS3(product[0].image, callback);
+      else callback();
+    }
+
+    // Удаление продукта
+    function deleteProduct(productId, callback) {
+      db.query('DELETE FROM products WHERE id = ?', [productId], (err) => {
+        if (err) return callback(err);
+        callback();
       });
     }
+
+    // Поиск и удаление продукта во втором филиале (ID = 8)
+    db.query(
+      'SELECT id, image FROM products WHERE name = ? AND branch_id = ?',
+      [productName, SECOND_BRANCH_ID],
+      (err, secondProduct) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+
+        deleteImage(() => {
+          deleteProduct(id, (err) => {
+            if (err) return res.status(500).json({ error: `Ошибка удаления продукта: ${err.message}` });
+
+            if (secondProduct.length > 0) {
+              const secondImage = secondProduct[0].image;
+              if (secondImage && secondImage !== product[0].image) {
+                deleteFromS3(secondImage, () => {
+                  deleteProduct(secondProduct[0].id, (err) => {
+                    if (err) return res.status(500).json({ error: `Ошибка удаления продукта второго филиала: ${err.message}` });
+                    res.json({ message: 'Продукт и его копия во втором филиале удалены' });
+                  });
+                });
+              } else {
+                deleteProduct(secondProduct[0].id, (err) => {
+                  if (err) return res.status(500).json({ error: `Ошибка удаления продукта второго филиала: ${err.message}` });
+                  res.json({ message: 'Продукт и его копия во втором филиале удалены' });
+                });
+              }
+            } else {
+              res.json({ message: 'Продукт удален' });
+            }
+          });
+        });
+      }
+    );
   });
 });
 
@@ -1204,29 +1342,53 @@ app.post('/discounts', authenticateToken, (req, res) => {
   const { productId, discountPercent, expiresAt, isActive } = req.body;
   if (!productId || !discountPercent) return res.status(400).json({ error: 'ID продукта и процент скидки обязательны' });
   if (discountPercent < 1 || discountPercent > 100) return res.status(400).json({ error: 'Процент скидки должен быть от 1 до 100' });
-  db.query('SELECT id FROM products WHERE id = ?', [productId], (err, product) => {
+
+  db.query('SELECT id, name FROM products WHERE id = ?', [productId], (err, product) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     if (product.length === 0) return res.status(404).json({ error: 'Продукт не найден' });
+
     db.query(`
       SELECT id FROM discounts
       WHERE product_id = ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
     `, [productId], (err, existingDiscount) => {
       if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
       if (existingDiscount.length > 0) return res.status(400).json({ error: 'Для этого продукта уже существует активная скидка' });
+
+      // Создание скидки для основного продукта
       db.query(
         'INSERT INTO discounts (product_id, discount_percent, expires_at, is_active) VALUES (?, ?, ?, ?)',
         [productId, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true],
         (err, result) => {
           if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+
+          // Поиск продукта во втором филиале (ID = 8)
           db.query(
-            `SELECT d.*, p.name as product_name
-            FROM discounts d
-            JOIN products p ON d.product_id = p.id
-            WHERE d.id = ?`,
-            [result.insertId],
-            (err, newDiscount) => {
+            'SELECT id FROM products WHERE name = ? AND branch_id = ?',
+            [product[0].name, SECOND_BRANCH_ID],
+            (err, secondProduct) => {
               if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-              res.status(201).json(newDiscount[0]);
+              if (secondProduct.length > 0) {
+                // Создание скидки для второго филиала
+                db.query(
+                  'INSERT INTO discounts (product_id, discount_percent, expires_at, is_active) VALUES (?, ?, ?, ?)',
+                  [secondProduct[0].id, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true],
+                  (err) => {
+                    if (err) return res.status(500).json({ error: `Ошибка создания скидки для второго филиала: ${err.message}` });
+                  }
+                );
+              }
+              // Возврат созданной скидки
+              db.query(
+                `SELECT d.*, p.name as product_name
+                FROM discounts d
+                JOIN products p ON d.product_id = p.id
+                WHERE d.id = ?`,
+                [result.insertId],
+                (err, newDiscount) => {
+                  if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+                  res.status(201).json(newDiscount[0]);
+                }
+              );
             }
           );
         }
