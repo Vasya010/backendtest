@@ -95,6 +95,14 @@ function authenticateToken(req, res, next) {
   });
 }
 
+// Проверка существования филиала
+function checkBranchExists(branchId, callback) {
+  db.query('SELECT id FROM branches WHERE id = ?', [branchId], (err, branch) => {
+    if (err) return callback(err);
+    callback(null, branch.length > 0);
+  });
+}
+
 function optionalAuthenticateToken(req, res, next) {
   const token = req.headers['authorization']?.split(' ')[1];
   if (token) {
@@ -962,16 +970,23 @@ app.delete('/subcategories/:id', authenticateToken, (req, res) => {
   });
 });
 
+// Создание продукта
 app.post('/products', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
     if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, sauceIds } = req.body;
     if (!req.file) return res.status(400).json({ error: 'Изображение обязательно' });
+    if (!name || !branchId || !categoryId) {
+      return res.status(400).json({ error: 'Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)' });
+    }
+
+    let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
+    if (!Array.isArray(sauceIdsArray)) {
+      return res.status(400).json({ error: 'sauceIds должен быть массивом' });
+    }
+
     uploadToS3(req.file, (err, imageKey) => {
       if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
-      if (!name || !branchId || !categoryId || !imageKey) {
-        return res.status(400).json({ error: 'Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)' });
-      }
 
       // Функция для создания продукта
       function createProduct(branchId, callback) {
@@ -1024,62 +1039,35 @@ app.post('/products', authenticateToken, (req, res) => {
         });
       }
 
-      // Создание продукта для основного филиала
+      // Создание продукта в основном филиале
       createProduct(branchId, (err, productId) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (err) return res.status(500).json({ error: `Ошибка создания продукта: ${err.message}` });
 
-        // Создание продукта для второго филиала (ID = 8)
-        createProduct(SECOND_BRANCH_ID, (err, secondProductId) => {
-          if (err) return res.status(500).json({ error: `Ошибка создания продукта для второго филиала: ${err.message}` });
+        // Привязка соусов к основному продукту
+        attachSauces(productId, sauceIdsArray, (err) => {
+          if (err) return res.status(500).json({ error: `Ошибка привязки соусов: ${err.message}` });
 
-          // Привязка соусов
-          let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
-          if (!Array.isArray(sauceIdsArray)) {
-            return res.status(400).json({ error: 'sauceIds должен быть массивом' });
-          }
+          // Проверка существования второго филиала
+          checkBranchExists(SECOND_BRANCH_ID, (err, branchExists) => {
+            if (err) return res.status(500).json({ error: `Ошибка проверки филиала: ${err.message}` });
+            if (!branchExists || branchId === SECOND_BRANCH_ID) {
+              // Если второго филиала нет или продукт создается для SECOND_BRANCH_ID, возвращаем результат
+              return fetchProduct(productId, res);
+            }
 
-          attachSauces(productId, sauceIdsArray, (err) => {
-            if (err) return res.status(500).json({ error: `Ошибка привязки соусов: ${err.message}` });
-            attachSauces(secondProductId, sauceIdsArray, (err) => {
-              if (err) return res.status(500).json({ error: `Ошибка привязки соусов для второго филиала: ${err.message}` });
+            // Создание продукта во втором филиале
+            createProduct(SECOND_BRANCH_ID, (err, secondProductId) => {
+              if (err) {
+                console.error(`Ошибка создания продукта для второго филиала: ${err.message}`);
+                // Не прерываем выполнение, возвращаем основной продукт
+                return fetchProduct(productId, res);
+              }
 
-              // Получение созданного продукта
-              db.query(
-                `
-                SELECT p.*,
-                       b.name as branch_name,
-                       c.name as category_name,
-                       s.name as subcategory_name,
-                       COALESCE(
-                         (SELECT JSON_ARRAYAGG(
-                           JSON_OBJECT(
-                             'id', sa.id,
-                             'name', sa.name,
-                             'price', sa.price,
-                             'image', sa.image
-                           )
-                         )
-                         FROM products_sauces ps
-                         LEFT JOIN sauces sa ON ps.sauce_id = sa.id
-                         WHERE ps.product_id = p.id AND sa.id IS NOT NULL),
-                         '[]'
-                       ) as sauces
-                FROM products p
-                LEFT JOIN branches b ON p.branch_id = b.id
-                LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN subcategories s ON p.sub_category_id = s.id
-                WHERE p.id = ?
-                GROUP BY p.id
-              `,
-                [productId],
-                (err, newProduct) => {
-                  if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-                  res.status(201).json({
-                    ...newProduct[0],
-                    sauces: newProduct[0].sauces ? JSON.parse(newProduct[0].sauces).filter(s => s.id) : []
-                  });
-                }
-              );
+              // Привязка соусов к продукту во втором филиале
+              attachSauces(secondProductId, sauceIdsArray, (err) => {
+                if (err) console.error(`Ошибка привязки соусов для второго филиала: ${err.message}`);
+                fetchProduct(productId, res);
+              });
             });
           });
         });
@@ -1088,6 +1076,7 @@ app.post('/products', authenticateToken, (req, res) => {
   });
 });
 
+// Обновление продукта
 app.put('/products/:id', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
     if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
@@ -1095,12 +1084,16 @@ app.put('/products/:id', authenticateToken, (req, res) => {
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, sauceIds } = req.body;
     let imageKey;
 
-    // Поиск продукта в исходном филиале
-    db.query('SELECT image FROM products WHERE id = ?', [id], (err, existing) => {
+    let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
+    if (!Array.isArray(sauceIdsArray)) {
+      return res.status(400).json({ error: 'sauceIds должен быть массивом' });
+    }
+
+    db.query('SELECT image, name FROM products WHERE id = ?', [id], (err, existing) => {
       if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
       if (existing.length === 0) return res.status(404).json({ error: 'Продукт не найден' });
 
-      // Загрузка нового изображения, если оно есть
+      // Загрузка нового изображения, если есть
       if (req.file) {
         uploadToS3(req.file, (err, key) => {
           if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
@@ -1169,117 +1162,83 @@ app.put('/products/:id', authenticateToken, (req, res) => {
           });
         }
 
-        // Обновление продукта в исходном филиале
+        // Обновление основного продукта
         updateSingleProduct(id, branchId, (err) => {
-          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          if (err) return res.status(500).json({ error: `Ошибка обновления продукта: ${err.message}` });
 
-          // Поиск продукта во втором филиале (ID = 8)
-          db.query(
-            'SELECT id FROM products WHERE name = ? AND branch_id = ? AND id != ?',
-            [name, SECOND_BRANCH_ID, id],
-            (err, secondProduct) => {
-              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-              let sauceIdsArray = Array.isArray(sauceIds) ? sauceIds : JSON.parse(sauceIds || '[]');
-              if (!Array.isArray(sauceIdsArray)) {
-                return res.status(400).json({ error: 'sauceIds должен быть массивом' });
+          // Обновление соусов для основного продукта
+          updateSauces(id, sauceIdsArray, (err) => {
+            if (err) return res.status(500).json({ error: `Ошибка обновления соусов: ${err.message}` });
+
+            // Проверка существования второго филиала
+            checkBranchExists(SECOND_BRANCH_ID, (err, branchExists) => {
+              if (err) return res.status(500).json({ error: `Ошибка проверки филиала: ${err.message}` });
+              if (!branchExists || branchId === SECOND_BRANCH_ID) {
+                return fetchProduct(id, res);
               }
 
-              if (secondProduct.length > 0) {
-                // Обновление существующего продукта во втором филиале
-                updateSingleProduct(secondProduct[0].id, SECOND_BRANCH_ID, (err) => {
-                  if (err) return res.status(500).json({ error: `Ошибка обновления продукта во втором филиале: ${err.message}` });
-                  updateSauces(secondProduct[0].id, sauceIdsArray, (err) => {
-                    if (err) return res.status(500).json({ error: `Ошибка обновления соусов для второго филиала: ${err.message}` });
-                    fetchUpdatedProduct();
-                  });
-                });
-              } else {
-                // Создание нового продукта во втором филиале
-                createProduct(SECOND_BRANCH_ID, (err, secondProductId) => {
-                  if (err) return res.status(500).json({ error: `Ошибка создания продукта для второго филиала: ${err.message}` });
-                  updateSauces(secondProductId, sauceIdsArray, (err) => {
-                    if (err) return res.status(500).json({ error: `Ошибка обновления соусов для второго филиала: ${err.message}` });
-                    fetchUpdatedProduct();
-                  });
-                });
-              }
+              // Поиск продукта во втором филиале
+              db.query(
+                'SELECT id FROM products WHERE name = ? AND branch_id = ? AND id != ?',
+                [existing[0].name, SECOND_BRANCH_ID, id],
+                (err, secondProduct) => {
+                  if (err) return res.status(500).json({ error: `Ошибка поиска продукта во втором филиале: ${err.message}` });
 
-              // Обновление соусов для исходного продукта
-              updateSauces(id, sauceIdsArray, (err) => {
-                if (err) return res.status(500).json({ error: `Ошибка обновления соусов: ${err.message}` });
-              });
-            }
-          );
+                  if (secondProduct.length > 0) {
+                    // Обновление продукта во втором филиале
+                    updateSingleProduct(secondProduct[0].id, SECOND_BRANCH_ID, (err) => {
+                      if (err) console.error(`Ошибка обновления продукта во втором филиале: ${err.message}`);
+                      updateSauces(secondProduct[0].id, sauceIdsArray, (err) => {
+                        if (err) console.error(`Ошибка обновления соусов для второго филиала: ${err.message}`);
+                        fetchProduct(id, res);
+                      });
+                    });
+                  } else {
+                    // Создание нового продукта во втором филиале
+                    createProduct(SECOND_BRANCH_ID, (err, secondProductId) => {
+                      if (err) console.error(`Ошибка создания продукта для второго филиала: ${err.message}`);
+                      updateSauces(secondProductId, sauceIdsArray, (err) => {
+                        if (err) console.error(`Ошибка привязки соусов для второго филиала: ${err.message}`);
+                        fetchProduct(id, res);
+                      });
+                    });
+                  }
+                }
+              );
+            });
+          });
         });
+      }
 
-        function createProduct(branchId, callback) {
-          db.query(
-            `INSERT INTO products (
-              name, description, price_small, price_medium, price_large, price_single,
-              branch_id, category_id, sub_category_id, image
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              name,
-              description || null,
-              priceSmall ? parseFloat(priceSmall) : null,
-              priceMedium ? parseFloat(priceMedium) : null,
-              priceLarge ? parseFloat(priceLarge) : null,
-              priceSingle ? parseFloat(priceSingle) : null,
-              branchId,
-              categoryId,
-              subCategoryId || null,
-              imageKey,
-            ],
-            (err, result) => {
-              if (err) return callback(err);
-              callback(null, result.insertId);
-            }
-          );
-        }
-
-        function fetchUpdatedProduct() {
-          db.query(
-            `
-            SELECT p.*,
-                   b.name as branch_name,
-                   c.name as category_name,
-                   s.name as subcategory_name,
-                   COALESCE(
-                     (SELECT JSON_ARRAYAGG(
-                       JSON_OBJECT(
-                         'id', sa.id,
-                         'name', sa.name,
-                         'price', sa.price,
-                         'image', sa.image
-                       )
-                     )
-                     FROM products_sauces ps
-                     LEFT JOIN sauces sa ON ps.sauce_id = sa.id
-                     WHERE ps.product_id = p.id AND sa.id IS NOT NULL),
-                     '[]'
-                   ) as sauces
-            FROM products p
-            LEFT JOIN branches b ON p.branch_id = b.id
-            LEFT JOIN categories c ON p.category_id = c.id
-            LEFT JOIN subcategories s ON p.sub_category_id = s.id
-            WHERE p.id = ?
-            GROUP BY p.id
-          `,
-            [id],
-            (err, updatedProduct) => {
-              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-              res.json({
-                ...updatedProduct[0],
-                sauces: updatedProduct[0].sauces ? JSON.parse(updatedProduct[0].sauces).filter(s => s.id) : []
-              });
-            }
-          );
-        }
+      function createProduct(branchId, callback) {
+        db.query(
+          `INSERT INTO products (
+            name, description, price_small, price_medium, price_large, price_single,
+            branch_id, category_id, sub_category_id, image
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            name,
+            description || null,
+            priceSmall ? parseFloat(priceSmall) : null,
+            priceMedium ? parseFloat(priceMedium) : null,
+            priceLarge ? parseFloat(priceLarge) : null,
+            priceSingle ? parseFloat(priceSingle) : null,
+            branchId,
+            categoryId,
+            subCategoryId || null,
+            imageKey,
+          ],
+          (err, result) => {
+            if (err) return callback(err);
+            callback(null, result.insertId);
+          }
+        );
       }
     });
   });
 });
 
+// Удаление продукта
 app.delete('/products/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
   db.query('SELECT image, name, branch_id FROM products WHERE id = ?', [id], (err, product) => {
@@ -1302,41 +1261,95 @@ app.delete('/products/:id', authenticateToken, (req, res) => {
       });
     }
 
-    // Поиск и удаление продукта во втором филиале (ID = 8)
-    db.query(
-      'SELECT id, image FROM products WHERE name = ? AND branch_id = ?',
-      [productName, SECOND_BRANCH_ID],
-      (err, secondProduct) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-
-        deleteImage(() => {
+    // Проверка существования второго филиала
+    checkBranchExists(SECOND_BRANCH_ID, (err, branchExists) => {
+      if (err) return res.status(500).json({ error: `Ошибка проверки филиала: ${err.message}` });
+      if (!branchExists || branchId === SECOND_BRANCH_ID) {
+        return deleteImage(() => {
           deleteProduct(id, (err) => {
             if (err) return res.status(500).json({ error: `Ошибка удаления продукта: ${err.message}` });
-
-            if (secondProduct.length > 0) {
-              const secondImage = secondProduct[0].image;
-              if (secondImage && secondImage !== product[0].image) {
-                deleteFromS3(secondImage, () => {
-                  deleteProduct(secondProduct[0].id, (err) => {
-                    if (err) return res.status(500).json({ error: `Ошибка удаления продукта второго филиала: ${err.message}` });
-                    res.json({ message: 'Продукт и его копия во втором филиале удалены' });
-                  });
-                });
-              } else {
-                deleteProduct(secondProduct[0].id, (err) => {
-                  if (err) return res.status(500).json({ error: `Ошибка удаления продукта второго филиала: ${err.message}` });
-                  res.json({ message: 'Продукт и его копия во втором филиале удалены' });
-                });
-              }
-            } else {
-              res.json({ message: 'Продукт удален' });
-            }
+            res.json({ message: 'Продукт удален' });
           });
         });
       }
-    );
+
+      // Поиск продукта во втором филиале
+      db.query(
+        'SELECT id, image FROM products WHERE name = ? AND branch_id = ?',
+        [productName, SECOND_BRANCH_ID],
+        (err, secondProduct) => {
+          if (err) return res.status(500).json({ error: `Ошибка поиска продукта во втором филиале: ${err.message}` });
+
+          deleteImage(() => {
+            deleteProduct(id, (err) => {
+              if (err) return res.status(500).json({ error: `Ошибка удаления продукта: ${err.message}` });
+
+              if (secondProduct.length > 0) {
+                const secondImage = secondProduct[0].image;
+                if (secondImage && secondImage !== product[0].image) {
+                  deleteFromS3(secondImage, () => {
+                    deleteProduct(secondProduct[0].id, (err) => {
+                      if (err) console.error(`Ошибка удаления продукта второго филиала: ${err.message}`);
+                      res.json({ message: 'Продукт и его копия во втором филиале удалены' });
+                    });
+                  });
+                } else {
+                  deleteProduct(secondProduct[0].id, (err) => {
+                    if (err) console.error(`Ошибка удаления продукта второго филиала: ${err.message}`);
+                    res.json({ message: 'Продукт и его копия во втором филиале удалены' });
+                  });
+                }
+              } else {
+                res.json({ message: 'Продукт удален' });
+              }
+            });
+          });
+        }
+      );
+    });
   });
 });
+
+// Вспомогательная функция для получения продукта
+function fetchProduct(productId, res) {
+  db.query(
+    `
+    SELECT p.*,
+           b.name as branch_name,
+           c.name as category_name,
+           s.name as subcategory_name,
+           COALESCE(
+             (SELECT JSON_ARRAYAGG(
+               JSON_OBJECT(
+                 'id', sa.id,
+                 'name', sa.name,
+                 'price', sa.price,
+                 'image', sa.image
+               )
+             )
+             FROM products_sauces ps
+             LEFT JOIN sauces sa ON ps.sauce_id = sa.id
+             WHERE ps.product_id = p.id AND sa.id IS NOT NULL),
+             '[]'
+           ) as sauces
+    FROM products p
+    LEFT JOIN branches b ON p.branch_id = b.id
+    LEFT JOIN categories c ON p.category_id = c.id
+    LEFT JOIN subcategories s ON p.sub_category_id = s.id
+    WHERE p.id = ?
+    GROUP BY p.id
+  `,
+    [productId],
+    (err, product) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (product.length === 0) return res.status(404).json({ error: 'Продукт не найден' });
+      res.status(201).json({
+        ...product[0],
+        sauces: product[0].sauces ? JSON.parse(product[0].sauces).filter(s => s && s.id) : []
+      });
+    }
+  );
+}
 
 app.post('/discounts', authenticateToken, (req, res) => {
   const { productId, discountPercent, expiresAt, isActive } = req.body;
