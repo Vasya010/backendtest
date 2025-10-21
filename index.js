@@ -571,7 +571,7 @@ app.get('/api/public/banners', (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const bannersWithUrls = banners.map(banner => ({
       ...banner,
-      image: `https://nukesul-brepb-651f.twc1.net/product-image/${banner.image.split('/').pop()}`
+      image: `https://vasya010-backendtest-260b.twc1.net/product-image/${banner.image.split('/').pop()}`
     }));
     res.json(bannersWithUrls);
   });
