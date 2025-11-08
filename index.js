@@ -321,6 +321,7 @@ function initializeServer(callback) {
               cart_items JSON,
               discount INT DEFAULT 0,
               promo_code VARCHAR(50),
+              cashback_used DECIMAL(10,2) DEFAULT 0,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
             )
@@ -329,7 +330,62 @@ function initializeServer(callback) {
               connection.release();
               return callback(err);
             }
-            createStoriesTable();
+            connection.query('SHOW COLUMNS FROM orders LIKE "cashback_used"', (err, columns) => {
+              if (err) {
+                connection.release();
+                return callback(err);
+              }
+              if (columns.length === 0) {
+                connection.query('ALTER TABLE orders ADD COLUMN cashback_used DECIMAL(10,2) DEFAULT 0', (err) => {
+                  if (err) {
+                    connection.release();
+                    return callback(err);
+                  }
+                  createCashbackTables();
+                });
+              } else {
+                createCashbackTables();
+              }
+            });
+          });
+        }
+        function createCashbackTables() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS cashback_balance (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              phone VARCHAR(20) NOT NULL UNIQUE,
+              balance DECIMAL(10,2) DEFAULT 0,
+              total_earned DECIMAL(10,2) DEFAULT 0,
+              total_spent DECIMAL(10,2) DEFAULT 0,
+              user_level ENUM('bronze', 'silver', 'gold', 'platinum') DEFAULT 'bronze',
+              total_orders INT DEFAULT 0,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            connection.query(`
+              CREATE TABLE IF NOT EXISTS cashback_transactions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                phone VARCHAR(20) NOT NULL,
+                order_id INT,
+                type ENUM('earned', 'spent', 'expired') NOT NULL,
+                amount DECIMAL(10,2) NOT NULL,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_phone (phone),
+                INDEX idx_order_id (order_id)
+              )
+            `, (err) => {
+              if (err) {
+                connection.release();
+                return callback(err);
+              }
+              createStoriesTable();
+            });
           });
         }
         function createStoriesTable() {
@@ -591,7 +647,7 @@ app.post('/api/public/validate-promo', (req, res) => {
 });
 
 app.post('/api/public/send-order', (req, res) => {
-  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod } = req.body;
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed } = req.body;
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: 'Корзина пуста или содержит некорректные данные' });
   }
@@ -608,61 +664,223 @@ app.post('/api/public/send-order', (req, res) => {
         error: `Для филиала "${branchName}" не настроен Telegram chat ID. Пожалуйста, свяжитесь с администратором для настройки.`,
       });
     }
+    const phone = orderDetails.phone || deliveryDetails.phone;
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
+    const finalTotal = Math.max(0, discountedTotal - (Number(cashbackUsed) || 0));
+    const cashbackUsedAmount = Number(cashbackUsed) || 0;
+    
+    // Начисляем кешбэк (5% от суммы после скидки, но до использования кешбэка)
+    const cashbackEarned = Math.round(discountedTotal * 0.05);
+    
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
     const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
+    
+    // Обрабатываем кешбэк
+    const processCashback = (callback) => {
+      if (!phone) {
+        return callback();
+      }
+      
+      // Списываем использованный кешбэк
+      if (cashbackUsedAmount > 0) {
+        db.query(
+          'UPDATE cashback_balance SET balance = balance - ?, total_spent = total_spent + ? WHERE phone = ? AND balance >= ?',
+          [cashbackUsedAmount, cashbackUsedAmount, phone, cashbackUsedAmount],
+          (err, result) => {
+            if (err) {
+              console.error('Ошибка списания кешбэка:', err);
+              return callback();
+            }
+            if (result.affectedRows > 0) {
+              // Записываем транзакцию списания
+              db.query(
+                'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "spent", ?, ?)',
+                [phone, null, cashbackUsedAmount, 'Использование кешбэка для оплаты заказа'],
+                () => {}
+              );
+            }
+            // Начисляем новый кешбэк
+            if (cashbackEarned > 0) {
+              db.query(
+                `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+                 VALUES (?, ?, ?, 1, 'bronze')
+                 ON DUPLICATE KEY UPDATE
+                 balance = balance + ?,
+                 total_earned = total_earned + ?,
+                 total_orders = total_orders + 1,
+                 user_level = CASE
+                   WHEN total_orders + 1 >= 100 THEN 'platinum'
+                   WHEN total_orders + 1 >= 50 THEN 'gold'
+                   WHEN total_orders + 1 >= 10 THEN 'silver'
+                   ELSE 'bronze'
+                 END`,
+                [phone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
+                (err) => {
+                  if (err) {
+                    console.error('Ошибка начисления кешбэка:', err);
+                    return callback();
+                  }
+                  // Записываем транзакцию начисления
+                  db.query(
+                    'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
+                    [phone, null, cashbackEarned, 'Кешбэк за заказ'],
+                    () => {}
+                  );
+                  callback();
+                }
+              );
+            } else {
+              callback();
+            }
+          }
+        );
+      } else if (cashbackEarned > 0) {
+        // Только начисляем кешбэк
+        db.query(
+          `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+           VALUES (?, ?, ?, 1, 'bronze')
+           ON DUPLICATE KEY UPDATE
+           balance = balance + ?,
+           total_earned = total_earned + ?,
+           total_orders = total_orders + 1,
+           user_level = CASE
+             WHEN total_orders + 1 >= 100 THEN 'platinum'
+             WHEN total_orders + 1 >= 50 THEN 'gold'
+             WHEN total_orders + 1 >= 10 THEN 'silver'
+             ELSE 'bronze'
+           END`,
+          [phone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
+          (err) => {
+            if (err) {
+              console.error('Ошибка начисления кешбэка:', err);
+              return callback();
+            }
+            db.query(
+              'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
+              [phone, null, cashbackEarned, 'Кешбэк за заказ'],
+              () => {}
+            );
+            callback();
+          }
+        );
+      } else {
+        callback();
+      }
+    };
+    
     const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
 👤 Имя: ${escapeMarkdown(orderDetails.name || deliveryDetails.name)}
-📞 Телефон: ${escapeMarkdown(orderDetails.phone || deliveryDetails.phone)}
+📞 Телефон: ${escapeMarkdown(phone)}
 📝 Комментарии: ${escapeMarkdown(orderDetails.comments || deliveryDetails.comments || "Нет")}
 📍 Адрес доставки: ${escapeMarkdown(deliveryDetails.address || "Самовывоз")}
 💳 Способ оплаты: ${escapeMarkdown(paymentMethodText)}
 🛒 *Товары:*
 ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт. по ${item.originalPrice} сом)`).join('\n')}
-💰 Итоговая стоимость: ${total.toFixed(2)} сом
-${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} сом` : '💸 Скидка не применена'}
-💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
+💰 Сумма товаров: ${total.toFixed(2)} сом
+${discount > 0 ? `💸 Скидка (${discount}%): -${(total * discount / 100).toFixed(2)} сом` : ''}
+${cashbackUsedAmount > 0 ? `🎁 Кешбэк использован: -${cashbackUsedAmount.toFixed(2)} сом` : ''}
+${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toFixed(2)} сом` : ''}
+💰 *Итоговая сумма: ${finalTotal.toFixed(2)} сом*
     `;
+    
     db.query(
       `
-      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
-      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code, cashback_used)
+      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
     `,
       [
         branchId,
-        discountedTotal,
+        finalTotal,
         JSON.stringify(orderDetails),
         JSON.stringify(deliveryDetails),
         JSON.stringify(cartItems),
         discount || 0,
         promoCode || null,
+        cashbackUsedAmount,
       ],
       (err, result) => {
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-        axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: orderText,
-            parse_mode: 'Markdown',
-          }
-        ).then(response => {
-          res.status(200).json({ message: 'Заказ успешно отправлен', orderId: result.insertId });
-        }).catch(telegramError => {
-          const errorDescription = telegramError.response?.data?.description || telegramError.message;
-          if (telegramError.response?.data?.error_code === 403) {
-            return res.status(500).json({
-              error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
+        const orderId = result.insertId;
+        
+        // Обновляем order_id в транзакциях кешбэка
+        if (phone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
+          db.query(
+            'UPDATE cashback_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
+            [orderId, phone],
+            () => {}
+          );
+        }
+        
+        processCashback(() => {
+          axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: chatId,
+              text: orderText,
+              parse_mode: 'Markdown',
+            }
+          ).then(response => {
+            res.status(200).json({ 
+              message: 'Заказ успешно отправлен', 
+              orderId: orderId,
+              cashbackEarned: cashbackEarned
             });
-          }
-          return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
+          }).catch(telegramError => {
+            const errorDescription = telegramError.response?.data?.description || telegramError.message;
+            if (telegramError.response?.data?.error_code === 403) {
+              return res.status(500).json({
+                error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
+              });
+            }
+            return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
+          });
         });
       }
     );
   });
+});
+
+// API для работы с кешбэком
+app.get('/api/public/cashback/balance/:phone', (req, res) => {
+  const { phone } = req.params;
+  if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
+  
+  db.query(
+    'SELECT balance, total_earned, total_spent, user_level, total_orders FROM cashback_balance WHERE phone = ?',
+    [phone],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (result.length === 0) {
+        return res.json({
+          balance: 0,
+          total_earned: 0,
+          total_spent: 0,
+          user_level: 'bronze',
+          total_orders: 0
+        });
+      }
+      res.json(result[0]);
+    }
+  );
+});
+
+app.get('/api/public/cashback/transactions/:phone', (req, res) => {
+  const { phone } = req.params;
+  const limit = parseInt(req.query.limit) || 50;
+  
+  if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
+  
+  db.query(
+    'SELECT * FROM cashback_transactions WHERE phone = ? ORDER BY created_at DESC LIMIT ?',
+    [phone, limit],
+    (err, transactions) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      res.json(transactions);
+    }
+  );
 });
 
 app.get('/', (req, res) => res.send('Booday Pizza API'));
