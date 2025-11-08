@@ -421,8 +421,29 @@ function initializeServer(callback) {
                 connection.release();
                 return callback(err);
               }
-              createUsersTable();
+              createQRCodeTable();
             });
+          });
+        }
+        function createQRCodeTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS user_qr_codes (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              user_id INT NOT NULL,
+              qr_token VARCHAR(255) NOT NULL UNIQUE,
+              expires_at TIMESTAMP NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              INDEX idx_user_id (user_id),
+              INDEX idx_qr_token (qr_token),
+              INDEX idx_expires_at (expires_at),
+              FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            createUsersTable();
           });
         }
         function createUsersTable() {
@@ -1330,6 +1351,128 @@ app.get('/api/public/cashback/transactions/:phone', (req, res) => {
     (err, transactions) => {
       if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
       res.json(transactions);
+    }
+  );
+});
+
+// Генерация уникального токена для QR-кода
+function generateQRToken() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let token = '';
+  for (let i = 0; i < 32; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+}
+
+// API для получения своего QR-кода
+app.get('/api/public/qr-code/my', authenticateToken, (req, res) => {
+  const userId = req.user.id;
+  
+  // Проверяем, есть ли действующий QR-код
+  db.query(
+    'SELECT * FROM user_qr_codes WHERE user_id = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+    [userId],
+    (err, qrCodes) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      if (qrCodes.length > 0) {
+        // Возвращаем существующий QR-код
+        const qrCode = qrCodes[0];
+        res.json({
+          qr_code: qrCode.qr_token,
+          expires_at: qrCode.expires_at,
+        });
+      } else {
+        // Создаем новый QR-код (действителен 10 минут)
+        const qrToken = generateQRToken();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 минут
+        
+        db.query(
+          'INSERT INTO user_qr_codes (user_id, qr_token, expires_at) VALUES (?, ?, ?)',
+          [userId, qrToken, expiresAt],
+          (err) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            
+            res.json({
+              qr_code: qrToken,
+              expires_at: expiresAt.toISOString(),
+            });
+          }
+        );
+      }
+    }
+  );
+});
+
+// API для сканирования QR-кода
+app.post('/api/public/qr-code/scan', authenticateToken, (req, res) => {
+  const { qr_code } = req.body;
+  const scannerUserId = req.user.id;
+  
+  if (!qr_code) {
+    return res.status(400).json({ error: 'QR-код обязателен' });
+  }
+  
+  // Находим пользователя по QR-коду
+  db.query(
+    'SELECT user_id, expires_at FROM user_qr_codes WHERE qr_token = ? AND expires_at > NOW()',
+    [qr_code],
+    (err, qrCodes) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      if (qrCodes.length === 0) {
+        return res.status(400).json({ error: 'QR-код недействителен или истек' });
+      }
+      
+      const qrCode = qrCodes[0];
+      const targetUserId = qrCode.user_id;
+      
+      // Нельзя сканировать свой QR-код
+      if (targetUserId === scannerUserId) {
+        return res.status(400).json({ error: 'Нельзя сканировать свой QR-код' });
+      }
+      
+      // Получаем информацию о пользователе
+      db.query('SELECT phone FROM app_users WHERE id = ?', [targetUserId], (err, users) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+        
+        const targetPhone = users[0].phone;
+        
+        // Начисляем бонусы (например, 50 баллов UDS за сканирование)
+        const bonusPoints = 50;
+        
+        db.query(
+          `INSERT INTO uds_balance (phone, balance, total_earned)
+           VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+           balance = balance + ?,
+           total_earned = total_earned + ?`,
+          [targetPhone, bonusPoints, bonusPoints, bonusPoints, bonusPoints],
+          (err) => {
+            if (err) {
+              console.error('Ошибка начисления бонусов:', err);
+              return res.status(500).json({ error: 'Ошибка начисления бонусов' });
+            }
+            
+            // Записываем транзакцию
+            db.query(
+              'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
+              [targetPhone, null, bonusPoints, 'Бонусы за сканирование QR-кода'],
+              () => {}
+            );
+            
+            // Удаляем использованный QR-код (можно использовать только один раз)
+            db.query('DELETE FROM user_qr_codes WHERE qr_token = ?', [qr_code], () => {});
+            
+            res.json({
+              message: `Бонусы успешно начислены! Начислено ${bonusPoints} баллов UDS.`,
+              bonus_points: bonusPoints,
+            });
+          }
+        );
+      });
     }
   );
 });
