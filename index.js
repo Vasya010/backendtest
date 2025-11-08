@@ -689,6 +689,23 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
   if (!branchId) {
     return res.status(400).json({ error: 'Не указан филиал (branchId отсутствует)' });
   }
+  
+  const userId = req.user?.id; // Получаем ID пользователя из токена (если есть)
+  const phone = orderDetails.phone || deliveryDetails.phone;
+  
+  // Получаем телефон пользователя из базы, если авторизован
+  const getUserPhone = (callback) => {
+    if (!userId) {
+      return callback(phone);
+    }
+    db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+      if (err || users.length === 0) {
+        return callback(phone);
+      }
+      callback(users[0].phone);
+    });
+  };
+  
   db.query('SELECT name, telegram_chat_id FROM branches WHERE id = ?', [branchId], (err, branch) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     if (branch.length === 0) return res.status(400).json({ error: `Филиал с id ${branchId} не найден` });
@@ -699,23 +716,25 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
         error: `Для филиала "${branchName}" не настроен Telegram chat ID. Пожалуйста, свяжитесь с администратором для настройки.`,
       });
     }
-    const phone = orderDetails.phone || deliveryDetails.phone;
+    
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
-    const finalTotal = Math.max(0, discountedTotal - (Number(cashbackUsed) || 0));
-    const cashbackUsedAmount = Number(cashbackUsed) || 0;
+    const cashbackUsedAmount = userId ? (Number(cashbackUsed) || 0) : 0; // Кешбэк только для авторизованных
     
-    // Начисляем кешбэк (5% от суммы после скидки, но до использования кешбэка)
-    const cashbackEarned = Math.round(discountedTotal * 0.05);
+    // Кешбэк начисляется только для авторизованных пользователей
+    const cashbackEarned = userId ? Math.round(discountedTotal * 0.05) : 0;
+    const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount);
     
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
     const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
     
-    // Обрабатываем кешбэк (только для авторизованных пользователей)
-    const processCashback = (callback) => {
-      if (!userId || !userPhone) {
-        return callback();
-      }
+    // Получаем телефон пользователя и обрабатываем заказ
+    getUserPhone((userPhone) => {
+      // Обрабатываем кешбэк (только для авторизованных пользователей)
+      const processCashback = (callback) => {
+        if (!userId || !userPhone) {
+          return callback();
+        }
       
       // Списываем использованный кешбэк
       if (cashbackUsedAmount > 0) {
@@ -875,6 +894,7 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         });
       }
     );
+    }); // Закрываем getUserPhone callback
   });
 });
 
