@@ -604,6 +604,63 @@ function initializeServer(callback) {
               connection.release();
               return callback(err);
             }
+            createProductPromoCodesTable();
+          });
+        }
+        function createProductPromoCodesTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS product_promo_codes (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              product_id INT NOT NULL,
+              promo_code_id INT NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+              FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id) ON DELETE CASCADE,
+              UNIQUE KEY unique_product_promo (product_id, promo_code_id)
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            createNewsTable();
+          });
+        }
+        function createNewsTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS news (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              title VARCHAR(255) NOT NULL,
+              content TEXT NOT NULL,
+              image VARCHAR(500),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            createPromotionsTable();
+          });
+        }
+        function createPromotionsTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS promotions (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              title VARCHAR(255) NOT NULL,
+              description TEXT NOT NULL,
+              image VARCHAR(500),
+              promo_code_id INT,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id) ON DELETE SET NULL
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
             addDiscountColumns();
           });
         }
@@ -2388,6 +2445,357 @@ app.get('/users', authenticateToken, (req, res) => {
   db.query('SELECT id, name, email FROM users', (err, users) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     res.json(users);
+  });
+});
+
+// ========== ПРОМОКОДЫ НА ТОВАРЫ ==========
+app.get('/product-promo-codes', authenticateToken, (req, res) => {
+  db.query(`
+    SELECT ppc.*, p.name as product_name, pc.code as promo_code, pc.discount_percent
+    FROM product_promo_codes ppc
+    LEFT JOIN products p ON ppc.product_id = p.id
+    LEFT JOIN promo_codes pc ON ppc.promo_code_id = pc.id
+    ORDER BY ppc.created_at DESC
+  `, (err, productPromoCodes) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    res.json(productPromoCodes);
+  });
+});
+
+app.post('/product-promo-codes', authenticateToken, (req, res) => {
+  const { productId, promoCodeId } = req.body;
+  if (!productId || !promoCodeId) {
+    return res.status(400).json({ error: 'ID продукта и промокода обязательны' });
+  }
+  db.query(
+    'INSERT INTO product_promo_codes (product_id, promo_code_id) VALUES (?, ?)',
+    [productId, promoCodeId],
+    (err, result) => {
+      if (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+          return res.status(400).json({ error: 'Эта привязка уже существует' });
+        }
+        return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      }
+      db.query(`
+        SELECT ppc.*, p.name as product_name, pc.code as promo_code, pc.discount_percent
+        FROM product_promo_codes ppc
+        LEFT JOIN products p ON ppc.product_id = p.id
+        LEFT JOIN promo_codes pc ON ppc.promo_code_id = pc.id
+        WHERE ppc.id = ?
+      `, [result.insertId], (err, rows) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        res.status(201).json(rows[0]);
+      });
+    }
+  );
+});
+
+app.delete('/product-promo-codes/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  db.query('DELETE FROM product_promo_codes WHERE id = ?', [id], (err) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    res.json({ message: 'Привязка удалена' });
+  });
+});
+
+// ========== НОВОСТИ ==========
+app.get('/news', authenticateToken, (req, res) => {
+  db.query('SELECT * FROM news ORDER BY created_at DESC', (err, news) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    const newsWithUrls = news.map(item => ({
+      ...item,
+      image: item.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${item.image.split('/').pop()}` : null
+    }));
+    res.json(newsWithUrls);
+  });
+});
+
+app.post('/news', authenticateToken, (req, res) => {
+  upload(req, res, (err) => {
+    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    const { title, content } = req.body;
+    if (!title || !content) {
+      return res.status(400).json({ error: 'Заголовок и содержание обязательны' });
+    }
+    
+    const handleInsert = (imageKey) => {
+      db.query(
+        'INSERT INTO news (title, content, image) VALUES (?, ?, ?)',
+        [title, content, imageKey || null],
+        (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          db.query('SELECT * FROM news WHERE id = ?', [result.insertId], (err, rows) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            const newsItem = rows[0];
+            res.status(201).json({
+              ...newsItem,
+              image: newsItem.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
+            });
+          });
+        }
+      );
+    };
+
+    if (req.file) {
+      uploadToS3(req.file, (err, key) => {
+        if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+        handleInsert(key);
+      });
+    } else {
+      handleInsert(null);
+    }
+  });
+});
+
+app.put('/news/:id', authenticateToken, (req, res) => {
+  upload(req, res, (err) => {
+    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    const { id } = req.params;
+    const { title, content } = req.body;
+    if (!title || !content) {
+      return res.status(400).json({ error: 'Заголовок и содержание обязательны' });
+    }
+
+    db.query('SELECT image FROM news WHERE id = ?', [id], (err, existing) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (existing.length === 0) return res.status(404).json({ error: 'Новость не найдена' });
+
+      let imageKey = existing[0].image;
+      if (req.file) {
+        uploadToS3(req.file, (err, key) => {
+          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          imageKey = key;
+          if (existing[0].image) deleteFromS3(existing[0].image, updateNews);
+          else updateNews();
+        });
+      } else {
+        updateNews();
+      }
+
+      function updateNews() {
+        db.query(
+          'UPDATE news SET title = ?, content = ?, image = ? WHERE id = ?',
+          [title, content, imageKey, id],
+          (err) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            db.query('SELECT * FROM news WHERE id = ?', [id], (err, rows) => {
+              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+              const newsItem = rows[0];
+              res.json({
+                ...newsItem,
+                image: newsItem.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
+              });
+            });
+          }
+        );
+      }
+    });
+  });
+});
+
+app.delete('/news/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  db.query('SELECT image FROM news WHERE id = ?', [id], (err, news) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (news.length === 0) return res.status(404).json({ error: 'Новость не найдена' });
+    if (news[0].image) deleteFromS3(news[0].image, deleteNews);
+    else deleteNews();
+    function deleteNews() {
+      db.query('DELETE FROM news WHERE id = ?', [id], (err) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        res.json({ message: 'Новость удалена' });
+      });
+    }
+  });
+});
+
+// ========== АКЦИИ ==========
+function sendPromotionNotifications(promotion, callback) {
+  db.query('SELECT id FROM app_users', (err, users) => {
+    if (err) {
+      console.error('Ошибка получения пользователей для уведомлений:', err);
+      return callback(err);
+    }
+    
+    let notificationsSent = 0;
+    let errors = 0;
+    const totalUsers = users.length;
+    
+    if (totalUsers === 0) {
+      return callback(null, { sent: 0, total: 0 });
+    }
+
+    const imageUrl = promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null;
+    const promoText = promotion.promo_code ? ` Промокод: ${promotion.promo_code} (${promotion.discount_percent}%)` : '';
+    
+    users.forEach((user, index) => {
+      const notification = {
+        user_id: user.id,
+        type: 'promotion',
+        title: promotion.title,
+        message: `${promotion.description}${promoText}`,
+        image_url: imageUrl,
+        action_url: null,
+        data: JSON.stringify({ promotion_id: promotion.id })
+      };
+
+      db.query(
+        'INSERT INTO notifications (user_id, type, title, message, image_url, action_url, data) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [notification.user_id, notification.type, notification.title, notification.message, notification.image_url, notification.action_url, notification.data],
+        (err) => {
+          if (err) {
+            console.error(`Ошибка создания уведомления для пользователя ${user.id}:`, err);
+            errors++;
+          } else {
+            notificationsSent++;
+          }
+
+          if (notificationsSent + errors === totalUsers) {
+            callback(null, { sent: notificationsSent, total: totalUsers, errors });
+          }
+        }
+      );
+    });
+  });
+}
+
+app.get('/promotions', authenticateToken, (req, res) => {
+  db.query(`
+    SELECT p.*, pc.code as promo_code, pc.discount_percent
+    FROM promotions p
+    LEFT JOIN promo_codes pc ON p.promo_code_id = pc.id
+    ORDER BY p.created_at DESC
+  `, (err, promotions) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    const promotionsWithUrls = promotions.map(item => ({
+      ...item,
+      image: item.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${item.image.split('/').pop()}` : null
+    }));
+    res.json(promotionsWithUrls);
+  });
+});
+
+app.post('/promotions', authenticateToken, (req, res) => {
+  upload(req, res, (err) => {
+    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    const { title, description, promo_code_id, send_notification } = req.body;
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Заголовок и описание обязательны' });
+    }
+
+    const handleInsert = (imageKey) => {
+      db.query(
+        'INSERT INTO promotions (title, description, image, promo_code_id) VALUES (?, ?, ?, ?)',
+        [title, description, imageKey || null, promo_code_id || null],
+        (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          
+          db.query(`
+            SELECT p.*, pc.code as promo_code, pc.discount_percent
+            FROM promotions p
+            LEFT JOIN promo_codes pc ON p.promo_code_id = pc.id
+            WHERE p.id = ?
+          `, [result.insertId], (err, rows) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            const promotion = rows[0];
+            const promotionWithUrl = {
+              ...promotion,
+              image: promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
+            };
+
+            // Отправка уведомлений, если требуется
+            if (send_notification === 'true' || send_notification === true) {
+              sendPromotionNotifications(promotionWithUrl, (err, result) => {
+                if (err) {
+                  console.error('Ошибка отправки уведомлений:', err);
+                } else {
+                  console.log(`Уведомления отправлены: ${result.sent} из ${result.total}`);
+                }
+              });
+            }
+
+            res.status(201).json(promotionWithUrl);
+          });
+        }
+      );
+    };
+
+    if (req.file) {
+      uploadToS3(req.file, (err, key) => {
+        if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+        handleInsert(key);
+      });
+    } else {
+      handleInsert(null);
+    }
+  });
+});
+
+app.put('/promotions/:id', authenticateToken, (req, res) => {
+  upload(req, res, (err) => {
+    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    const { id } = req.params;
+    const { title, description, promo_code_id } = req.body;
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Заголовок и описание обязательны' });
+    }
+
+    db.query('SELECT image FROM promotions WHERE id = ?', [id], (err, existing) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (existing.length === 0) return res.status(404).json({ error: 'Акция не найдена' });
+
+      let imageKey = existing[0].image;
+      if (req.file) {
+        uploadToS3(req.file, (err, key) => {
+          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          imageKey = key;
+          if (existing[0].image) deleteFromS3(existing[0].image, updatePromotion);
+          else updatePromotion();
+        });
+      } else {
+        updatePromotion();
+      }
+
+      function updatePromotion() {
+        db.query(
+          'UPDATE promotions SET title = ?, description = ?, image = ?, promo_code_id = ? WHERE id = ?',
+          [title, description, imageKey, promo_code_id || null, id],
+          (err) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            db.query(`
+              SELECT p.*, pc.code as promo_code, pc.discount_percent
+              FROM promotions p
+              LEFT JOIN promo_codes pc ON p.promo_code_id = pc.id
+              WHERE p.id = ?
+            `, [id], (err, rows) => {
+              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+              const promotion = rows[0];
+              res.json({
+                ...promotion,
+                image: promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
+              });
+            });
+          }
+        );
+      }
+    });
+  });
+});
+
+app.delete('/promotions/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  db.query('SELECT image FROM promotions WHERE id = ?', [id], (err, promotions) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (promotions.length === 0) return res.status(404).json({ error: 'Акция не найдена' });
+    if (promotions[0].image) deleteFromS3(promotions[0].image, deletePromotion);
+    else deletePromotion();
+    function deletePromotion() {
+      db.query('DELETE FROM promotions WHERE id = ?', [id], (err) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        res.json({ message: 'Акция удалена' });
+      });
+    }
   });
 });
 
