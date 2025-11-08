@@ -384,6 +384,43 @@ function initializeServer(callback) {
                 connection.release();
                 return callback(err);
               }
+              createUDSTables();
+            });
+          });
+        }
+        function createUDSTables() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS uds_balance (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              phone VARCHAR(20) NOT NULL UNIQUE,
+              balance INT DEFAULT 0,
+              total_earned INT DEFAULT 0,
+              total_spent INT DEFAULT 0,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            connection.query(`
+              CREATE TABLE IF NOT EXISTS uds_transactions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                phone VARCHAR(20) NOT NULL,
+                order_id INT,
+                type ENUM('earned', 'spent', 'expired') NOT NULL,
+                amount INT NOT NULL,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_phone (phone),
+                INDEX idx_order_id (order_id)
+              )
+            `, (err) => {
+              if (err) {
+                connection.release();
+                return callback(err);
+              }
               createUsersTable();
             });
           });
@@ -682,7 +719,7 @@ app.post('/api/public/validate-promo', (req, res) => {
 });
 
 app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
-  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed } = req.body;
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed, udsPointsUsed } = req.body;
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: 'Корзина пуста или содержит некорректные данные' });
   }
@@ -720,10 +757,13 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
     const cashbackUsedAmount = userId ? (Number(cashbackUsed) || 0) : 0; // Кешбэк только для авторизованных
+    const udsPointsUsedAmount = userId ? (Number(udsPointsUsed) || 0) : 0; // UDS только для авторизованных
     
     // Кешбэк начисляется только для авторизованных пользователей
     const cashbackEarned = userId ? Math.round(discountedTotal * 0.03) : 0; // 3% кешбэк
-    const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount);
+    // UDS бонусы: 1 балл за 1 сом
+    const udsPointsEarned = userId ? Math.round(discountedTotal) : 0;
+    const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount - udsPointsUsedAmount);
     
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
     const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
@@ -823,6 +863,85 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
       }
     };
     
+    // Обрабатываем UDS (только для авторизованных пользователей)
+    const processUDS = (callback) => {
+      if (!userId || !userPhone) {
+        return callback();
+      }
+      
+      // Списываем использованные UDS баллы
+      if (udsPointsUsedAmount > 0) {
+        db.query(
+          'UPDATE uds_balance SET balance = balance - ?, total_spent = total_spent + ? WHERE phone = ? AND balance >= ?',
+          [udsPointsUsedAmount, udsPointsUsedAmount, userPhone, udsPointsUsedAmount],
+          (err, result) => {
+            if (err) {
+              console.error('Ошибка списания UDS:', err);
+              return callback();
+            }
+            if (result.affectedRows > 0) {
+              // Записываем транзакцию списания
+              db.query(
+                'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "spent", ?, ?)',
+                [userPhone, null, udsPointsUsedAmount, 'Использование UDS бонусов для оплаты заказа'],
+                () => {}
+              );
+            }
+            // Начисляем новые UDS баллы
+            if (udsPointsEarned > 0) {
+              db.query(
+                `INSERT INTO uds_balance (phone, balance, total_earned)
+                 VALUES (?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                 balance = balance + ?,
+                 total_earned = total_earned + ?`,
+                [userPhone, udsPointsEarned, udsPointsEarned, udsPointsEarned, udsPointsEarned],
+                (err) => {
+                  if (err) {
+                    console.error('Ошибка начисления UDS:', err);
+                    return callback();
+                  }
+                  // Записываем транзакцию начисления
+                  db.query(
+                    'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
+                    [userPhone, null, udsPointsEarned, 'UDS бонусы за заказ'],
+                    () => {}
+                  );
+                  callback();
+                }
+              );
+            } else {
+              callback();
+            }
+          }
+        );
+      } else if (udsPointsEarned > 0) {
+        // Только начисляем UDS баллы
+        db.query(
+          `INSERT INTO uds_balance (phone, balance, total_earned)
+           VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+           balance = balance + ?,
+           total_earned = total_earned + ?`,
+          [userPhone, udsPointsEarned, udsPointsEarned, udsPointsEarned, udsPointsEarned],
+          (err) => {
+            if (err) {
+              console.error('Ошибка начисления UDS:', err);
+              return callback();
+            }
+            db.query(
+              'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
+              [userPhone, null, udsPointsEarned, 'UDS бонусы за заказ'],
+              () => {}
+            );
+            callback();
+          }
+        );
+      } else {
+        callback();
+      }
+    };
+    
     const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
@@ -837,6 +956,8 @@ ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт
 ${discount > 0 ? `💸 Скидка (${discount}%): -${(total * discount / 100).toFixed(2)} сом` : ''}
 ${cashbackUsedAmount > 0 ? `🎁 Кешбэк использован: -${cashbackUsedAmount.toFixed(2)} сом` : ''}
 ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toFixed(2)} сом` : ''}
+${udsPointsUsedAmount > 0 ? `⭐ UDS бонусы использованы: -${udsPointsUsedAmount} баллов (${udsPointsUsedAmount} сом)` : ''}
+${udsPointsEarned > 0 ? `⭐ UDS бонусы начислены: +${udsPointsEarned} баллов` : ''}
 💰 *Итоговая сумма: ${finalTotal.toFixed(2)} сом*
     `;
     
@@ -868,7 +989,18 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
           );
         }
         
+        // Обновляем order_id в транзакциях UDS
+        if (userId && userPhone && (udsPointsUsedAmount > 0 || udsPointsEarned > 0)) {
+          db.query(
+            'UPDATE uds_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
+            [orderId, userPhone],
+            () => {}
+          );
+        }
+        
+        // Обрабатываем кешбэк и UDS, затем отправляем в Telegram
         processCashback(() => {
+          processUDS(() => {
           axios.post(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
             {
@@ -880,7 +1012,8 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
             res.status(200).json({ 
               message: 'Заказ успешно отправлен', 
               orderId: orderId,
-              cashbackEarned: cashbackEarned
+              cashbackEarned: cashbackEarned,
+              udsPointsEarned: udsPointsEarned
             });
           }).catch(telegramError => {
             const errorDescription = telegramError.response?.data?.description || telegramError.message;
@@ -890,6 +1023,7 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
               });
             }
             return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
+          });
           });
         });
       }
@@ -1117,6 +1251,71 @@ app.get('/api/public/cashback/balance/:phone', (req, res) => {
       res.json(result[0]);
     }
   );
+});
+
+// API для получения UDS баланса по токену (для авторизованных пользователей)
+app.get('/api/public/uds/balance', optionalAuthenticateToken, (req, res) => {
+  const userId = req.user?.id;
+  
+  if (!userId) {
+    return res.json({
+      balance: 0,
+      total_earned: 0,
+      total_spent: 0,
+      isAuthenticated: false
+    });
+  }
+  
+  // Получаем телефон пользователя
+  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    const phone = users[0].phone;
+    
+    db.query(
+      'SELECT balance, total_earned, total_spent FROM uds_balance WHERE phone = ?',
+      [phone],
+      (err, result) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (result.length === 0) {
+          return res.json({
+            balance: 0,
+            total_earned: 0,
+            total_spent: 0,
+            isAuthenticated: true
+          });
+        }
+        res.json({ ...result[0], isAuthenticated: true });
+      }
+    );
+  });
+});
+
+// API для получения транзакций UDS по токену
+app.get('/api/public/uds/transactions', optionalAuthenticateToken, (req, res) => {
+  const userId = req.user?.id;
+  const limit = parseInt(req.query.limit) || 50;
+  
+  if (!userId) {
+    return res.json([]);
+  }
+  
+  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    const phone = users[0].phone;
+    
+    db.query(
+      'SELECT * FROM uds_transactions WHERE phone = ? ORDER BY created_at DESC LIMIT ?',
+      [phone, limit],
+      (err, transactions) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        res.json(transactions);
+      }
+    );
+  });
 });
 
 app.get('/api/public/cashback/transactions/:phone', (req, res) => {
