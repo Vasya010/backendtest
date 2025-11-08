@@ -421,21 +421,26 @@ function initializeServer(callback) {
                 connection.release();
                 return callback(err);
               }
-              createQRCodeTable();
+              createNotificationsTable();
             });
           });
         }
-        function createQRCodeTable() {
+        function createNotificationsTable() {
           connection.query(`
-            CREATE TABLE IF NOT EXISTS user_qr_codes (
+            CREATE TABLE IF NOT EXISTS notifications (
               id INT AUTO_INCREMENT PRIMARY KEY,
-              user_id INT NOT NULL,
-              qr_token VARCHAR(255) NOT NULL UNIQUE,
-              expires_at TIMESTAMP NOT NULL,
+              user_id INT,
+              type ENUM('discount', 'promotion', 'order', 'cashback', 'general') NOT NULL DEFAULT 'general',
+              title VARCHAR(255) NOT NULL,
+              message TEXT NOT NULL,
+              image_url VARCHAR(500),
+              action_url VARCHAR(500),
+              data JSON,
+              is_read BOOLEAN DEFAULT FALSE,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               INDEX idx_user_id (user_id),
-              INDEX idx_qr_token (qr_token),
-              INDEX idx_expires_at (expires_at),
+              INDEX idx_is_read (is_read),
+              INDEX idx_created_at (created_at),
               FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
             )
           `, (err) => {
@@ -740,7 +745,7 @@ app.post('/api/public/validate-promo', (req, res) => {
 });
 
 app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
-  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed, udsPointsUsed } = req.body;
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed } = req.body;
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: 'Корзина пуста или содержит некорректные данные' });
   }
@@ -778,13 +783,10 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
     const cashbackUsedAmount = userId ? (Number(cashbackUsed) || 0) : 0; // Кешбэк только для авторизованных
-    const udsPointsUsedAmount = userId ? (Number(udsPointsUsed) || 0) : 0; // UDS только для авторизованных
     
     // Кешбэк начисляется только для авторизованных пользователей
     const cashbackEarned = userId ? Math.round(discountedTotal * 0.03) : 0; // 3% кешбэк
-    // UDS бонусы: 1 балл за 1 сом
-    const udsPointsEarned = userId ? Math.round(discountedTotal) : 0;
-    const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount - udsPointsUsedAmount);
+    const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount);
     
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
     const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
@@ -884,85 +886,6 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
       }
     };
     
-    // Обрабатываем UDS (только для авторизованных пользователей)
-    const processUDS = (callback) => {
-      if (!userId || !userPhone) {
-        return callback();
-      }
-      
-      // Списываем использованные UDS баллы
-      if (udsPointsUsedAmount > 0) {
-        db.query(
-          'UPDATE uds_balance SET balance = balance - ?, total_spent = total_spent + ? WHERE phone = ? AND balance >= ?',
-          [udsPointsUsedAmount, udsPointsUsedAmount, userPhone, udsPointsUsedAmount],
-          (err, result) => {
-            if (err) {
-              console.error('Ошибка списания UDS:', err);
-              return callback();
-            }
-            if (result.affectedRows > 0) {
-              // Записываем транзакцию списания
-              db.query(
-                'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "spent", ?, ?)',
-                [userPhone, null, udsPointsUsedAmount, 'Использование UDS бонусов для оплаты заказа'],
-                () => {}
-              );
-            }
-            // Начисляем новые UDS баллы
-            if (udsPointsEarned > 0) {
-              db.query(
-                `INSERT INTO uds_balance (phone, balance, total_earned)
-                 VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE
-                 balance = balance + ?,
-                 total_earned = total_earned + ?`,
-                [userPhone, udsPointsEarned, udsPointsEarned, udsPointsEarned, udsPointsEarned],
-                (err) => {
-                  if (err) {
-                    console.error('Ошибка начисления UDS:', err);
-                    return callback();
-                  }
-                  // Записываем транзакцию начисления
-                  db.query(
-                    'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-                    [userPhone, null, udsPointsEarned, 'UDS бонусы за заказ'],
-                    () => {}
-                  );
-                  callback();
-                }
-              );
-            } else {
-              callback();
-            }
-          }
-        );
-      } else if (udsPointsEarned > 0) {
-        // Только начисляем UDS баллы
-        db.query(
-          `INSERT INTO uds_balance (phone, balance, total_earned)
-           VALUES (?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-           balance = balance + ?,
-           total_earned = total_earned + ?`,
-          [userPhone, udsPointsEarned, udsPointsEarned, udsPointsEarned, udsPointsEarned],
-          (err) => {
-            if (err) {
-              console.error('Ошибка начисления UDS:', err);
-              return callback();
-            }
-            db.query(
-              'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-              [userPhone, null, udsPointsEarned, 'UDS бонусы за заказ'],
-              () => {}
-            );
-            callback();
-          }
-        );
-      } else {
-        callback();
-      }
-    };
-    
     const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
@@ -977,8 +900,6 @@ ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт
 ${discount > 0 ? `💸 Скидка (${discount}%): -${(total * discount / 100).toFixed(2)} сом` : ''}
 ${cashbackUsedAmount > 0 ? `🎁 Кешбэк использован: -${cashbackUsedAmount.toFixed(2)} сом` : ''}
 ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toFixed(2)} сом` : ''}
-${udsPointsUsedAmount > 0 ? `⭐ UDS бонусы использованы: -${udsPointsUsedAmount} баллов (${udsPointsUsedAmount} сом)` : ''}
-${udsPointsEarned > 0 ? `⭐ UDS бонусы начислены: +${udsPointsEarned} баллов` : ''}
 💰 *Итоговая сумма: ${finalTotal.toFixed(2)} сом*
     `;
     
@@ -1010,18 +931,8 @@ ${udsPointsEarned > 0 ? `⭐ UDS бонусы начислены: +${udsPointsEa
           );
         }
         
-        // Обновляем order_id в транзакциях UDS
-        if (userId && userPhone && (udsPointsUsedAmount > 0 || udsPointsEarned > 0)) {
-          db.query(
-            'UPDATE uds_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
-            [orderId, userPhone],
-            () => {}
-          );
-        }
-        
-        // Обрабатываем кешбэк и UDS, затем отправляем в Telegram
+        // Обрабатываем кешбэк, затем отправляем в Telegram
         processCashback(() => {
-          processUDS(() => {
           axios.post(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
             {
@@ -1033,8 +944,7 @@ ${udsPointsEarned > 0 ? `⭐ UDS бонусы начислены: +${udsPointsEa
             res.status(200).json({ 
               message: 'Заказ успешно отправлен', 
               orderId: orderId,
-              cashbackEarned: cashbackEarned,
-              udsPointsEarned: udsPointsEarned
+              cashbackEarned: cashbackEarned
             });
           }).catch(telegramError => {
             const errorDescription = telegramError.response?.data?.description || telegramError.message;
@@ -1044,7 +954,6 @@ ${udsPointsEarned > 0 ? `⭐ UDS бонусы начислены: +${udsPointsEa
               });
             }
             return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
-          });
           });
         });
       }
@@ -1274,69 +1183,51 @@ app.get('/api/public/cashback/balance/:phone', (req, res) => {
   );
 });
 
-// API для получения UDS баланса по токену (для авторизованных пользователей)
-app.get('/api/public/uds/balance', optionalAuthenticateToken, (req, res) => {
-  const userId = req.user?.id;
-  
-  if (!userId) {
-    return res.json({
-      balance: 0,
-      total_earned: 0,
-      total_spent: 0,
-      isAuthenticated: false
-    });
-  }
-  
-  // Получаем телефон пользователя
-  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
-    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
-    
-    const phone = users[0].phone;
-    
-    db.query(
-      'SELECT balance, total_earned, total_spent FROM uds_balance WHERE phone = ?',
-      [phone],
-      (err, result) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-        if (result.length === 0) {
-          return res.json({
-            balance: 0,
-            total_earned: 0,
-            total_spent: 0,
-            isAuthenticated: true
-          });
-        }
-        res.json({ ...result[0], isAuthenticated: true });
-      }
-    );
-  });
-});
-
-// API для получения транзакций UDS по токену
-app.get('/api/public/uds/transactions', optionalAuthenticateToken, (req, res) => {
-  const userId = req.user?.id;
+// API для получения уведомлений
+app.get('/api/public/notifications', authenticateToken, (req, res) => {
+  const userId = req.user.id;
   const limit = parseInt(req.query.limit) || 50;
   
-  if (!userId) {
-    return res.json([]);
-  }
+  db.query(
+    `SELECT * FROM notifications 
+     WHERE user_id = ? OR user_id IS NULL 
+     ORDER BY created_at DESC 
+     LIMIT ?`,
+    [userId, limit],
+    (err, notifications) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      res.json(notifications);
+    }
+  );
+});
+
+// API для отметки уведомления как прочитанного
+app.put('/api/public/notifications/:id/read', authenticateToken, (req, res) => {
+  const notificationId = req.params.id;
+  const userId = req.user.id;
   
-  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
-    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
-    
-    const phone = users[0].phone;
-    
-    db.query(
-      'SELECT * FROM uds_transactions WHERE phone = ? ORDER BY created_at DESC LIMIT ?',
-      [phone, limit],
-      (err, transactions) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-        res.json(transactions);
-      }
-    );
-  });
+  db.query(
+    'UPDATE notifications SET is_read = TRUE WHERE id = ? AND (user_id = ? OR user_id IS NULL)',
+    [notificationId, userId],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      res.json({ success: true });
+    }
+  );
+});
+
+// API для отметки всех уведомлений как прочитанных
+app.put('/api/public/notifications/read-all', authenticateToken, (req, res) => {
+  const userId = req.user.id;
+  
+  db.query(
+    'UPDATE notifications SET is_read = TRUE WHERE (user_id = ? OR user_id IS NULL) AND is_read = FALSE',
+    [userId],
+    (err) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      res.json({ success: true });
+    }
+  );
 });
 
 app.get('/api/public/cashback/transactions/:phone', (req, res) => {
@@ -1440,26 +1331,26 @@ app.post('/api/public/qr-code/scan', authenticateToken, (req, res) => {
         
         const targetPhone = users[0].phone;
         
-        // Начисляем бонусы (например, 50 баллов UDS за сканирование)
-        const bonusPoints = 50;
+        // Начисляем кешбэк (50 сом) за сканирование QR-кода
+        const bonusCashback = 50;
         
         db.query(
-          `INSERT INTO uds_balance (phone, balance, total_earned)
-           VALUES (?, ?, ?)
+          `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+           VALUES (?, ?, ?, 0, 'bronze')
            ON DUPLICATE KEY UPDATE
            balance = balance + ?,
            total_earned = total_earned + ?`,
-          [targetPhone, bonusPoints, bonusPoints, bonusPoints, bonusPoints],
+          [targetPhone, bonusCashback, bonusCashback, bonusCashback, bonusCashback],
           (err) => {
             if (err) {
-              console.error('Ошибка начисления бонусов:', err);
-              return res.status(500).json({ error: 'Ошибка начисления бонусов' });
+              console.error('Ошибка начисления кешбэка:', err);
+              return res.status(500).json({ error: 'Ошибка начисления кешбэка' });
             }
             
             // Записываем транзакцию
             db.query(
-              'INSERT INTO uds_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-              [targetPhone, null, bonusPoints, 'Бонусы за сканирование QR-кода'],
+              'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
+              [targetPhone, null, bonusCashback, 'Кешбэк за сканирование QR-кода'],
               () => {}
             );
             
@@ -1467,8 +1358,8 @@ app.post('/api/public/qr-code/scan', authenticateToken, (req, res) => {
             db.query('DELETE FROM user_qr_codes WHERE qr_token = ?', [qr_code], () => {});
             
             res.json({
-              message: `Бонусы успешно начислены! Начислено ${bonusPoints} баллов UDS.`,
-              bonus_points: bonusPoints,
+              message: `Кешбэк успешно начислен! Начислено ${bonusCashback} сом кешбэка.`,
+              bonus_cashback: bonusCashback,
             });
           }
         );
