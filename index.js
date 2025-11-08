@@ -384,8 +384,26 @@ function initializeServer(callback) {
                 connection.release();
                 return callback(err);
               }
-              createStoriesTable();
+              createUsersTable();
             });
+          });
+        }
+        function createUsersTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS app_users (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              phone VARCHAR(20) NOT NULL UNIQUE,
+              name VARCHAR(100),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_phone (phone)
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            createStoriesTable();
           });
         }
         function createStoriesTable() {
@@ -840,6 +858,84 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         });
       }
     );
+  });
+});
+
+// API для входа/регистрации по телефону
+app.post('/api/public/auth/phone', (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
+  
+  // Очищаем телефон от лишних символов
+  const cleanPhone = phone.replace(/\D/g, '');
+  if (cleanPhone.length < 10) {
+    return res.status(400).json({ error: 'Некорректный номер телефона' });
+  }
+  
+  // Проверяем, существует ли пользователь
+  db.query('SELECT * FROM app_users WHERE phone = ?', [cleanPhone], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    
+    if (users.length === 0) {
+      // Регистрация нового пользователя
+      db.query('INSERT INTO app_users (phone) VALUES (?)', [cleanPhone], (err, result) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        
+        const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ 
+          token, 
+          user: { id: result.insertId, phone: cleanPhone, name: null },
+          isNewUser: true
+        });
+      });
+    } else {
+      // Вход существующего пользователя
+      const user = users[0];
+      const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+      res.json({ 
+        token, 
+        user: { id: user.id, phone: user.phone, name: user.name },
+        isNewUser: false
+      });
+    }
+  });
+});
+
+// API для обновления имени пользователя
+app.put('/api/public/auth/profile', optionalAuthenticateToken, (req, res) => {
+  const { name } = req.body;
+  const userId = req.user?.id;
+  
+  if (!userId) return res.status(401).json({ error: 'Необходима авторизация' });
+  if (!name || name.trim().length === 0) {
+    return res.status(400).json({ error: 'Имя не может быть пустым' });
+  }
+  
+  db.query('UPDATE app_users SET name = ? WHERE id = ?', [name.trim(), userId], (err, result) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    
+    db.query('SELECT * FROM app_users WHERE id = ?', [userId], (err, users) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+      
+      const user = users[0];
+      res.json({ user: { id: user.id, phone: user.phone, name: user.name } });
+    });
+  });
+});
+
+// API для получения профиля пользователя
+app.get('/api/public/auth/profile', optionalAuthenticateToken, (req, res) => {
+  const userId = req.user?.id;
+  
+  if (!userId) return res.status(401).json({ error: 'Необходима авторизация' });
+  
+  db.query('SELECT * FROM app_users WHERE id = ?', [userId], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    const user = users[0];
+    res.json({ user: { id: user.id, phone: user.phone, name: user.name } });
   });
 });
 
