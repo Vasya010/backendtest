@@ -394,6 +394,7 @@ function initializeServer(callback) {
               id INT AUTO_INCREMENT PRIMARY KEY,
               phone VARCHAR(20) NOT NULL UNIQUE,
               name VARCHAR(100),
+              address TEXT,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               INDEX idx_phone (phone)
@@ -403,7 +404,23 @@ function initializeServer(callback) {
               connection.release();
               return callback(err);
             }
-            createStoriesTable();
+            connection.query('SHOW COLUMNS FROM app_users LIKE "address"', (err, columns) => {
+              if (err) {
+                connection.release();
+                return callback(err);
+              }
+              if (columns.length === 0) {
+                connection.query('ALTER TABLE app_users ADD COLUMN address TEXT', (err) => {
+                  if (err) {
+                    connection.release();
+                    return callback(err);
+                  }
+                  createStoriesTable();
+                });
+              } else {
+                createStoriesTable();
+              }
+            });
           });
         }
         function createStoriesTable() {
@@ -664,7 +681,7 @@ app.post('/api/public/validate-promo', (req, res) => {
   });
 });
 
-app.post('/api/public/send-order', (req, res) => {
+app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
   const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed } = req.body;
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: 'Корзина пуста или содержит некорректные данные' });
@@ -694,9 +711,9 @@ app.post('/api/public/send-order', (req, res) => {
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
     const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
     
-    // Обрабатываем кешбэк
+    // Обрабатываем кешбэк (только для авторизованных пользователей)
     const processCashback = (callback) => {
-      if (!phone) {
+      if (!userId || !userPhone) {
         return callback();
       }
       
@@ -704,7 +721,7 @@ app.post('/api/public/send-order', (req, res) => {
       if (cashbackUsedAmount > 0) {
         db.query(
           'UPDATE cashback_balance SET balance = balance - ?, total_spent = total_spent + ? WHERE phone = ? AND balance >= ?',
-          [cashbackUsedAmount, cashbackUsedAmount, phone, cashbackUsedAmount],
+          [cashbackUsedAmount, cashbackUsedAmount, userPhone, cashbackUsedAmount],
           (err, result) => {
             if (err) {
               console.error('Ошибка списания кешбэка:', err);
@@ -714,7 +731,7 @@ app.post('/api/public/send-order', (req, res) => {
               // Записываем транзакцию списания
               db.query(
                 'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "spent", ?, ?)',
-                [phone, null, cashbackUsedAmount, 'Использование кешбэка для оплаты заказа'],
+                [userPhone, null, cashbackUsedAmount, 'Использование кешбэка для оплаты заказа'],
                 () => {}
               );
             }
@@ -733,7 +750,7 @@ app.post('/api/public/send-order', (req, res) => {
                    WHEN total_orders + 1 >= 10 THEN 'silver'
                    ELSE 'bronze'
                  END`,
-                [phone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
+                [userPhone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
                 (err) => {
                   if (err) {
                     console.error('Ошибка начисления кешбэка:', err);
@@ -742,7 +759,7 @@ app.post('/api/public/send-order', (req, res) => {
                   // Записываем транзакцию начисления
                   db.query(
                     'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-                    [phone, null, cashbackEarned, 'Кешбэк за заказ'],
+                    [userPhone, null, cashbackEarned, 'Кешбэк за заказ'],
                     () => {}
                   );
                   callback();
@@ -768,7 +785,7 @@ app.post('/api/public/send-order', (req, res) => {
              WHEN total_orders + 1 >= 10 THEN 'silver'
              ELSE 'bronze'
            END`,
-          [phone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
+          [userPhone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
           (err) => {
             if (err) {
               console.error('Ошибка начисления кешбэка:', err);
@@ -776,7 +793,7 @@ app.post('/api/public/send-order', (req, res) => {
             }
             db.query(
               'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-              [phone, null, cashbackEarned, 'Кешбэк за заказ'],
+              [userPhone, null, cashbackEarned, 'Кешбэк за заказ'],
               () => {}
             );
             callback();
@@ -824,10 +841,10 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         const orderId = result.insertId;
         
         // Обновляем order_id в транзакциях кешбэка
-        if (phone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
+        if (userId && userPhone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
           db.query(
             'UPDATE cashback_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
-            [orderId, phone],
+            [orderId, userPhone],
             () => {}
           );
         }
@@ -901,17 +918,67 @@ app.post('/api/public/auth/phone', (req, res) => {
   });
 });
 
-// API для обновления имени пользователя
+// API для обновления профиля пользователя
 app.put('/api/public/auth/profile', optionalAuthenticateToken, (req, res) => {
-  const { name } = req.body;
+  const { name, phone, address } = req.body;
   const userId = req.user?.id;
   
   if (!userId) return res.status(401).json({ error: 'Необходима авторизация' });
-  if (!name || name.trim().length === 0) {
-    return res.status(400).json({ error: 'Имя не может быть пустым' });
+  
+  const updates = [];
+  const values = [];
+  
+  if (name !== undefined) {
+    if (name.trim().length === 0) {
+      return res.status(400).json({ error: 'Имя не может быть пустым' });
+    }
+    updates.push('name = ?');
+    values.push(name.trim());
   }
   
-  db.query('UPDATE app_users SET name = ? WHERE id = ?', [name.trim(), userId], (err, result) => {
+  if (phone !== undefined) {
+    const cleanPhone = phone.replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ error: 'Некорректный номер телефона' });
+    }
+    // Проверяем, не занят ли телефон другим пользователем
+    db.query('SELECT id FROM app_users WHERE phone = ? AND id != ?', [cleanPhone, userId], (err, users) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (users.length > 0) {
+        return res.status(400).json({ error: 'Этот номер телефона уже используется' });
+      }
+      
+      updates.push('phone = ?');
+      values.push(cleanPhone);
+      values.push(userId);
+      
+      db.query(`UPDATE app_users SET ${updates.join(', ')} WHERE id = ?`, values, (err, result) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        
+        db.query('SELECT * FROM app_users WHERE id = ?', [userId], (err, users) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+          
+          const user = users[0];
+          res.json({ user: { id: user.id, phone: user.phone, name: user.name, address: user.address } });
+        });
+      });
+    });
+    return;
+  }
+  
+  if (address !== undefined) {
+    updates.push('address = ?');
+    values.push(address.trim() || null);
+  }
+  
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'Нет данных для обновления' });
+  }
+  
+  values.push(userId);
+  
+  db.query(`UPDATE app_users SET ${updates.join(', ')} WHERE id = ?`, values, (err, result) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     
     db.query('SELECT * FROM app_users WHERE id = ?', [userId], (err, users) => {
@@ -919,7 +986,7 @@ app.put('/api/public/auth/profile', optionalAuthenticateToken, (req, res) => {
       if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
       
       const user = users[0];
-      res.json({ user: { id: user.id, phone: user.phone, name: user.name } });
+      res.json({ user: { id: user.id, phone: user.phone, name: user.name, address: user.address } });
     });
   });
 });
@@ -935,7 +1002,76 @@ app.get('/api/public/auth/profile', optionalAuthenticateToken, (req, res) => {
     if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
     
     const user = users[0];
-    res.json({ user: { id: user.id, phone: user.phone, name: user.name } });
+    res.json({ user: { id: user.id, phone: user.phone, name: user.name, address: user.address } });
+  });
+});
+
+// API для получения кешбэка по токену (для авторизованных пользователей)
+app.get('/api/public/cashback/balance', optionalAuthenticateToken, (req, res) => {
+  const userId = req.user?.id;
+  
+  if (!userId) {
+    return res.json({
+      balance: 0,
+      total_earned: 0,
+      total_spent: 0,
+      user_level: 'bronze',
+      total_orders: 0,
+      isAuthenticated: false
+    });
+  }
+  
+  // Получаем телефон пользователя
+  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    const phone = users[0].phone;
+    
+    db.query(
+      'SELECT balance, total_earned, total_spent, user_level, total_orders FROM cashback_balance WHERE phone = ?',
+      [phone],
+      (err, result) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (result.length === 0) {
+          return res.json({
+            balance: 0,
+            total_earned: 0,
+            total_spent: 0,
+            user_level: 'bronze',
+            total_orders: 0,
+            isAuthenticated: true
+          });
+        }
+        res.json({ ...result[0], isAuthenticated: true });
+      }
+    );
+  });
+});
+
+// API для получения транзакций кешбэка по токену
+app.get('/api/public/cashback/transactions', optionalAuthenticateToken, (req, res) => {
+  const userId = req.user?.id;
+  const limit = parseInt(req.query.limit) || 50;
+  
+  if (!userId) {
+    return res.json([]);
+  }
+  
+  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    const phone = users[0].phone;
+    
+    db.query(
+      'SELECT * FROM cashback_transactions WHERE phone = ? ORDER BY created_at DESC LIMIT ?',
+      [phone, limit],
+      (err, transactions) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        res.json(transactions);
+      }
+    );
   });
 });
 
