@@ -456,6 +456,7 @@ function initializeServer(callback) {
             CREATE TABLE IF NOT EXISTS app_users (
               id INT AUTO_INCREMENT PRIMARY KEY,
               phone VARCHAR(20) NOT NULL UNIQUE,
+              last_qr_cashback_date DATE,
               name VARCHAR(100),
               address TEXT,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -478,10 +479,42 @@ function initializeServer(callback) {
                     connection.release();
                     return callback(err);
                   }
-                  createStoriesTable();
+                  // Проверяем наличие поля last_qr_cashback_date
+                  connection.query('SHOW COLUMNS FROM app_users LIKE "last_qr_cashback_date"', (err, cashbackColumns) => {
+                    if (err) {
+                      connection.release();
+                      return callback(err);
+                    }
+                    if (cashbackColumns.length === 0) {
+                      connection.query('ALTER TABLE app_users ADD COLUMN last_qr_cashback_date DATE', (err) => {
+                        connection.release();
+                        return callback(err);
+                      });
+                    } else {
+                      connection.release();
+                      return callback(null);
+                    }
+                  });
                 });
               } else {
-                createStoriesTable();
+                // Проверяем наличие поля last_qr_cashback_date
+                connection.query('SHOW COLUMNS FROM app_users LIKE "last_qr_cashback_date"', (err, cashbackColumns) => {
+                  if (err) {
+                    connection.release();
+                    return callback(err);
+                  }
+                  if (cashbackColumns.length === 0) {
+                    connection.query('ALTER TABLE app_users ADD COLUMN last_qr_cashback_date DATE', (err) => {
+                      if (err) {
+                        connection.release();
+                        return callback(err);
+                      }
+                      createStoriesTable();
+                    });
+                  } else {
+                    createStoriesTable();
+                  }
+                });
               }
             });
           });
@@ -1260,81 +1293,108 @@ function generateQRToken() {
 app.get('/api/public/qr-code/my', authenticateToken, (req, res) => {
   const userId = req.user.id;
   
-  // Получаем телефон пользователя для начисления кешбэка
-  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
-    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
-    
-    const userPhone = users[0].phone;
-    
-    // Проверяем, есть ли действующий QR-код
+    // Сначала проверяем, был ли уже начислен кешбэк сегодня (до любых других проверок)
     db.query(
-      'SELECT * FROM user_qr_codes WHERE user_id = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+      'SELECT phone, last_qr_cashback_date FROM app_users WHERE id = ?',
       [userId],
-      (err, qrCodes) => {
+      (err, users) => {
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
         
-        if (qrCodes.length > 0) {
-          // Возвращаем существующий QR-код (без начисления кешбэка)
-          const qrCode = qrCodes[0];
-          res.json({
-            qr_code: qrCode.qr_token,
-            expires_at: qrCode.expires_at,
-            cashback_earned: 0, // Не начисляем при показе существующего
-          });
-        } else {
-          // Создаем новый QR-код (действителен 10 минут)
-          const qrToken = generateQRToken();
-          const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 минут
-          
-          // Начисляем кешбэк за показ QR-кода (например, 30 сом)
-          const cashbackAmount = 30;
-          
-          db.query(
-            'INSERT INTO user_qr_codes (user_id, qr_token, expires_at) VALUES (?, ?, ?)',
-            [userId, qrToken, expiresAt],
-            (err) => {
-              if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        const userPhone = users[0].phone;
+        const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+        const lastCashbackDate = users[0]?.last_qr_cashback_date;
+        const shouldAwardCashback = !lastCashbackDate || lastCashbackDate !== today;
+        
+        // Проверяем, есть ли действующий QR-код
+        db.query(
+          'SELECT * FROM user_qr_codes WHERE user_id = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+          [userId],
+          (err, qrCodes) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            
+            if (qrCodes.length > 0) {
+              // Возвращаем существующий QR-код (без начисления кешбэка)
+              const qrCode = qrCodes[0];
+              res.json({
+                qr_code: qrCode.qr_token,
+                expires_at: qrCode.expires_at,
+                cashback_earned: 0, // Не начисляем при показе существующего
+              });
+            } else {
+              // Создаем новый QR-код (действителен 10 минут)
+              const qrToken = generateQRToken();
+              const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 минут
               
-              // Начисляем кешбэк за показ QR-кода
+              // Начисляем кешбэк за показ QR-кода только один раз в день (30 сом)
+              const cashbackAmount = shouldAwardCashback ? 30 : 0;
+              
               db.query(
-                `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
-                 VALUES (?, ?, ?, 0, 'bronze')
-                 ON DUPLICATE KEY UPDATE
-                 balance = balance + ?,
-                 total_earned = total_earned + ?`,
-                [userPhone, cashbackAmount, cashbackAmount, cashbackAmount, cashbackAmount],
+                'INSERT INTO user_qr_codes (user_id, qr_token, expires_at) VALUES (?, ?, ?)',
+                [userId, qrToken, expiresAt],
                 (err) => {
-                  if (err) {
-                    console.error('Ошибка начисления кешбэка за QR-код:', err);
-                    // Продолжаем даже если кешбэк не начислен
-                    return res.json({
+                  if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+                  
+                  if (shouldAwardCashback && cashbackAmount > 0) {
+                    // Начисляем кешбэк за показ QR-кода
+                    db.query(
+                      `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+                       VALUES (?, ?, ?, 0, 'bronze')
+                       ON DUPLICATE KEY UPDATE
+                       balance = balance + ?,
+                       total_earned = total_earned + ?`,
+                      [userPhone, cashbackAmount, cashbackAmount, cashbackAmount, cashbackAmount],
+                      (err) => {
+                        if (err) {
+                          console.error('Ошибка начисления кешбэка за QR-код:', err);
+                          // Продолжаем даже если кешбэк не начислен
+                          return res.json({
+                            qr_code: qrToken,
+                            expires_at: expiresAt.toISOString(),
+                            cashback_earned: 0,
+                          });
+                        }
+                        
+                        // Записываем транзакцию
+                        db.query(
+                          'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
+                          [userPhone, null, cashbackAmount, 'Кешбэк за показ QR-кода'],
+                          () => {}
+                        );
+                        
+                        // Обновляем дату последнего начисления кешбэка за QR-код СРАЗУ после начисления
+                        db.query(
+                          'UPDATE app_users SET last_qr_cashback_date = ? WHERE id = ?',
+                          [today, userId],
+                          (updateErr) => {
+                            if (updateErr) {
+                              console.error('Ошибка обновления даты кешбэка:', updateErr);
+                            }
+                          }
+                        );
+                        
+                        res.json({
+                          qr_code: qrToken,
+                          expires_at: expiresAt.toISOString(),
+                          cashback_earned: cashbackAmount,
+                        });
+                      }
+                    );
+                  } else {
+                    // Не начисляем кешбэк, просто возвращаем QR-код
+                    res.json({
                       qr_code: qrToken,
                       expires_at: expiresAt.toISOString(),
                       cashback_earned: 0,
                     });
                   }
-                  
-                  // Записываем транзакцию
-                  db.query(
-                    'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-                    [userPhone, null, cashbackAmount, 'Кешбэк за показ QR-кода'],
-                    () => {}
-                  );
-                  
-                  res.json({
-                    qr_code: qrToken,
-                    expires_at: expiresAt.toISOString(),
-                    cashback_earned: cashbackAmount,
-                  });
                 }
               );
             }
-          );
-        }
+          }
+        );
       }
     );
-  });
 });
 
 // API для сканирования QR-кода
