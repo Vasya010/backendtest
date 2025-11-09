@@ -608,6 +608,41 @@ function initializeServer(callback) {
               connection.release();
               return callback(err);
             }
+            createUtensilsTable();
+          });
+        }
+        function createUtensilsTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS utensils (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              name VARCHAR(255) NOT NULL,
+              price DECIMAL(10,2) NOT NULL DEFAULT 0,
+              image VARCHAR(255) DEFAULT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            createOrdersUtensilsTable();
+          });
+        }
+        function createOrdersUtensilsTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS orders_utensils (
+              order_id VARCHAR(255) NOT NULL,
+              utensil_id INT NOT NULL,
+              quantity INT NOT NULL DEFAULT 1,
+              PRIMARY KEY (order_id, utensil_id),
+              FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+              FOREIGN KEY (utensil_id) REFERENCES utensils(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
             createProductPromoCodesTable();
           });
         }
@@ -850,6 +885,25 @@ app.get('/api/public/products/:productId/sauces', (req, res) => {
   });
 });
 
+// Публичный endpoint для получения всех приборов
+app.get('/api/public/utensils', (req, res) => {
+  db.query('SELECT id, name, price, image FROM utensils ORDER BY name', (err, utensils) => {
+    if (err) {
+      console.error('Ошибка получения приборов:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    
+    const utensilsWithUrls = utensils.map(utensil => ({
+      id: utensil.id,
+      name: utensil.name,
+      price: parseFloat(utensil.price) || 0,
+      image: utensil.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${utensil.image.split('/').pop()}` : null
+    }));
+    
+    res.json(utensilsWithUrls);
+  });
+});
+
 app.get('/api/public/branches/:branchId/orders', (req, res) => {
   const { branchId } = req.params;
   db.query(`
@@ -906,7 +960,7 @@ app.post('/api/public/validate-promo', (req, res) => {
 });
 
 app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
-  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed } = req.body;
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed, utensils } = req.body;
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: 'Корзина пуста или содержит некорректные данные' });
   }
@@ -1047,6 +1101,10 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
       }
     };
     
+    const utensilsText = utensils && Array.isArray(utensils) && utensils.length > 0
+      ? `🍴 *Приборы:*\n${utensils.map((u) => `- ${escapeMarkdown(u.name)} (${u.quantity || 1} шт.)`).join('\n')}\n`
+      : '';
+    
     const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
@@ -1057,7 +1115,7 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
 💳 Способ оплаты: ${escapeMarkdown(paymentMethodText)}
 🛒 *Товары:*
 ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт. по ${item.originalPrice} сом)`).join('\n')}
-💰 Сумма товаров: ${total.toFixed(2)} сом
+${utensilsText}💰 Сумма товаров: ${total.toFixed(2)} сом
 ${discount > 0 ? `💸 Скидка (${discount}%): -${(total * discount / 100).toFixed(2)} сом` : ''}
 ${cashbackUsedAmount > 0 ? `🎁 Кешбэк использован: -${cashbackUsedAmount.toFixed(2)} сом` : ''}
 ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toFixed(2)} сом` : ''}
@@ -1083,17 +1141,40 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         const orderId = result.insertId;
         
-        // Обновляем order_id в транзакциях кешбэка
-        if (userId && userPhone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
-          db.query(
-            'UPDATE cashback_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
-            [orderId, userPhone],
-            () => {}
-          );
+        // Сохраняем приборы для заказа
+        if (utensils && Array.isArray(utensils) && utensils.length > 0) {
+          let utensilsInserted = 0;
+          utensils.forEach((utensil) => {
+            db.query(
+              'INSERT INTO orders_utensils (order_id, utensil_id, quantity) VALUES (?, ?, ?)',
+              [orderId, utensil.id, utensil.quantity || 1],
+              (err) => {
+                if (err) {
+                  console.error('Ошибка сохранения прибора:', err);
+                }
+                utensilsInserted++;
+                if (utensilsInserted === utensils.length) {
+                  continueWithOrder();
+                }
+              }
+            );
+          });
+        } else {
+          continueWithOrder();
         }
         
-        // Обрабатываем кешбэк, затем отправляем в Telegram
-        processCashback(() => {
+        function continueWithOrder() {
+          // Обновляем order_id в транзакциях кешбэка
+          if (userId && userPhone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
+            db.query(
+              'UPDATE cashback_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
+              [orderId, userPhone],
+              () => {}
+            );
+          }
+          
+          // Обрабатываем кешбэк, затем отправляем в Telegram
+          processCashback(() => {
           axios.post(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
             {
@@ -1117,6 +1198,7 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
             return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
           });
         });
+        }
       }
     );
     }); // Закрываем getUserPhone callback
