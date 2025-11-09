@@ -154,7 +154,8 @@ db.on('error', (err) => {
   if (err.code === 'PROTOCOL_CONNECTION_LOST') {
     console.log('🔄 Переподключение к MySQL...');
   } else {
-    throw err;
+    console.error('❌ Критическая ошибка MySQL:', err);
+    // Не выбрасываем ошибку, чтобы сервер продолжал работать
   }
 });
 
@@ -190,20 +191,32 @@ app.get('/product-image/:key', optionalAuthenticateToken, (req, res) => {
 });
 
 function initializeServer(callback) {
-  const maxRetries = 5;
+  const maxRetries = 10; // Увеличиваем количество попыток
   let retryCount = 0;
   function attemptConnection() {
     db.getConnection((err, connection) => {
       if (err) {
         retryCount++;
-        if (retryCount < maxRetries) setTimeout(attemptConnection, 5000);
-        else callback(new Error(`MySQL connection failed after ${maxRetries} attempts: ${err.message}`));
+        console.error(`❌ Попытка подключения ${retryCount}/${maxRetries} не удалась:`, err.message);
+        if (retryCount < maxRetries) {
+          const delay = Math.min(5000 * retryCount, 30000); // Увеличиваем задержку с каждой попыткой
+          console.log(`🔄 Повторная попытка через ${delay/1000} секунд...`);
+          setTimeout(attemptConnection, delay);
+        } else {
+          console.error(`❌ MySQL connection failed after ${maxRetries} attempts: ${err.message}`);
+          // Не вызываем callback с ошибкой, чтобы сервер мог запуститься даже без БД
+          console.warn('⚠️  Сервер запускается без подключения к БД. Некоторые функции могут быть недоступны.');
+          callback(null); // Запускаем сервер даже при ошибке БД
+        }
         return;
       }
       connection.query('SELECT 1', (err) => {
         if (err) {
           connection.release();
-          return callback(new Error(`MySQL connection test failed: ${err.message}`));
+          console.error('❌ Ошибка теста подключения MySQL:', err.message);
+          // Не вызываем callback с ошибкой, продолжаем инициализацию
+          console.warn('⚠️  Продолжаем инициализацию без проверки БД...');
+          return callback(null);
         }
         connection.query(`
           CREATE TABLE IF NOT EXISTS branches (
@@ -3218,29 +3231,55 @@ app.get('/sms/send', async (req, res) => {
 initializeServer((err) => {
   if (err) {
     console.error('❌ Ошибка инициализации сервера:', err.message);
+    console.warn('⚠️  Продолжаем запуск сервера...');
+    // Не завершаем процесс, чтобы сервер мог работать даже с ошибками инициализации
+  }
+  
+  const PORT = process.env.PORT || 3000;
+  
+  try {
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`✅ Сервер запущен на порту ${PORT}`);
+      console.log(`🌐 API доступен по адресу: http://0.0.0.0:${PORT}`);
+      console.log(`📡 Публичные endpoints:`);
+      console.log(`   - GET  /api/public/branches`);
+      console.log(`   - GET  /api/public/branches/:branchId/products`);
+      console.log(`   - GET  /api/public/sauces`);
+      console.log(`   - GET  /api/public/products/:productId/sauces`);
+    });
+    
+    // Обработка ошибок сервера
+    server.on('error', (err) => {
+      console.error('❌ Ошибка сервера:', err);
+      if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Порт ${PORT} уже занят. Попробуйте использовать другой порт.`);
+        process.exit(1);
+      }
+    });
+  } catch (error) {
+    console.error('❌ Критическая ошибка при запуске сервера:', error);
     process.exit(1);
   }
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`✅ Сервер запущен на порту ${PORT}`);
-    console.log(`🌐 API доступен по адресу: http://localhost:${PORT}`);
-    console.log(`📡 Публичные endpoints:`);
-    console.log(`   - GET  /api/public/branches`);
-    console.log(`   - GET  /api/public/branches/:branchId/products`);
-    console.log(`   - GET  /api/public/sauces`);
-    console.log(`   - GET  /api/public/products/:productId/sauces`);
-  });
   
-  // Обработка ошибок сервера
-  app.on('error', (err) => {
-    console.error('❌ Ошибка сервера:', err);
-  });
-  
+  // Обработка необработанных исключений
   process.on('uncaughtException', (err) => {
     console.error('❌ Необработанное исключение:', err);
+    // Не завершаем процесс, чтобы сервер продолжал работать
   });
   
   process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Необработанный rejection:', reason);
+    // Не завершаем процесс, чтобы сервер продолжал работать
+  });
+  
+  // Graceful shutdown
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM получен, завершаем работу...');
+    process.exit(0);
+  });
+  
+  process.on('SIGINT', () => {
+    console.log('SIGINT получен, завершаем работу...');
+    process.exit(0);
   });
 });
