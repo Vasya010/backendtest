@@ -774,12 +774,79 @@ app.get('/api/public/branches/:branchId/products', (req, res) => {
     WHERE p.branch_id = ?
     GROUP BY p.id
   `, [branchId], (err, products) => {
-    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    const parsedProducts = products.map(product => ({
-      ...product,
-      sauces: product.sauces ? JSON.parse(product.sauces).filter(s => s && s.id) : []
-    }));
+    if (err) {
+      console.error('Ошибка получения продуктов:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    
+    const parsedProducts = products.map(product => {
+      let sauces = [];
+      try {
+        if (product.sauces) {
+          const parsed = typeof product.sauces === 'string' 
+            ? JSON.parse(product.sauces) 
+            : product.sauces;
+          sauces = Array.isArray(parsed) 
+            ? parsed.filter(s => s && s.id) 
+            : [];
+        }
+      } catch (e) {
+        console.error('Ошибка парсинга соусов для продукта', product.id, ':', e);
+        sauces = [];
+      }
+      
+      return {
+        ...product,
+        sauces: sauces
+      };
+    });
+    
     res.json(parsedProducts);
+  });
+});
+
+// Публичный endpoint для получения всех соусов
+app.get('/api/public/sauces', (req, res) => {
+  db.query('SELECT id, name, price, image FROM sauces ORDER BY name', (err, sauces) => {
+    if (err) {
+      console.error('Ошибка получения соусов:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    
+    const saucesWithUrls = sauces.map(sauce => ({
+      id: sauce.id,
+      name: sauce.name,
+      price: parseFloat(sauce.price) || 0,
+      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null
+    }));
+    
+    res.json(saucesWithUrls);
+  });
+});
+
+// Публичный endpoint для получения соусов конкретного продукта
+app.get('/api/public/products/:productId/sauces', (req, res) => {
+  const { productId } = req.params;
+  db.query(`
+    SELECT s.id, s.name, s.price, s.image
+    FROM products_sauces ps
+    LEFT JOIN sauces s ON ps.sauce_id = s.id
+    WHERE ps.product_id = ? AND s.id IS NOT NULL
+    ORDER BY s.name
+  `, [productId], (err, sauces) => {
+    if (err) {
+      console.error('Ошибка получения соусов продукта:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    
+    const saucesWithUrls = sauces.map(sauce => ({
+      id: sauce.id,
+      name: sauce.name,
+      price: parseFloat(sauce.price) || 0,
+      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null
+    }));
+    
+    res.json(saucesWithUrls);
   });
 });
 
