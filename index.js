@@ -11,69 +11,7 @@ const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
-
-// Настройка CORS
-const corsOptions = {
-  origin: [
-    'https://americanpizzakg.com',
-    'http://americanpizzakg.com',
-    'https://www.americanpizzakg.com',
-    'http://www.americanpizzakg.com',
-    'https://vasya010-backendtest-260b.twc1.net',
-    'http://vasya010-backendtest-260b.twc1.net',
-    'http://localhost:3000',
-    'http://localhost:8080',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:8080',
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  maxAge: 86400, // 24 часа
-};
-
-app.use(cors(corsOptions));
-
-// Дополнительный middleware для установки CORS заголовков
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const allowedOrigins = [
-    'https://americanpizzakg.com',
-    'http://americanpizzakg.com',
-    'https://www.americanpizzakg.com',
-    'http://www.americanpizzakg.com',
-    'https://vasya010-backendtest-260b.twc1.net',
-    'http://vasya010-backendtest-260b.twc1.net',
-    'http://localhost:3000',
-    'http://localhost:8080',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:8080',
-  ];
-  
-  if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else if (!origin) {
-    // Разрешаем запросы без origin (например, из Postman)
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-  
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Max-Age', '86400');
-  
-  // Обработка preflight запросов
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  
-  next();
-});
-
-// Обработка preflight запросов
-app.options('*', cors(corsOptions));
-
+app.use(cors());
 app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key_very_secure_random_string';
@@ -154,8 +92,7 @@ db.on('error', (err) => {
   if (err.code === 'PROTOCOL_CONNECTION_LOST') {
     console.log('🔄 Переподключение к MySQL...');
   } else {
-    console.error('❌ Критическая ошибка MySQL:', err);
-    // Не выбрасываем ошибку, чтобы сервер продолжал работать
+    throw err;
   }
 });
 
@@ -191,32 +128,20 @@ app.get('/product-image/:key', optionalAuthenticateToken, (req, res) => {
 });
 
 function initializeServer(callback) {
-  const maxRetries = 10; // Увеличиваем количество попыток
+  const maxRetries = 5;
   let retryCount = 0;
   function attemptConnection() {
     db.getConnection((err, connection) => {
       if (err) {
         retryCount++;
-        console.error(`❌ Попытка подключения ${retryCount}/${maxRetries} не удалась:`, err.message);
-        if (retryCount < maxRetries) {
-          const delay = Math.min(5000 * retryCount, 30000); // Увеличиваем задержку с каждой попыткой
-          console.log(`🔄 Повторная попытка через ${delay/1000} секунд...`);
-          setTimeout(attemptConnection, delay);
-        } else {
-          console.error(`❌ MySQL connection failed after ${maxRetries} attempts: ${err.message}`);
-          // Не вызываем callback с ошибкой, чтобы сервер мог запуститься даже без БД
-          console.warn('⚠️  Сервер запускается без подключения к БД. Некоторые функции могут быть недоступны.');
-          callback(null); // Запускаем сервер даже при ошибке БД
-        }
+        if (retryCount < maxRetries) setTimeout(attemptConnection, 5000);
+        else callback(new Error(`MySQL connection failed after ${maxRetries} attempts: ${err.message}`));
         return;
       }
       connection.query('SELECT 1', (err) => {
         if (err) {
           connection.release();
-          console.error('❌ Ошибка теста подключения MySQL:', err.message);
-          // Не вызываем callback с ошибкой, продолжаем инициализацию
-          console.warn('⚠️  Продолжаем инициализацию без проверки БД...');
-          return callback(null);
+          return callback(new Error(`MySQL connection test failed: ${err.message}`));
         }
         connection.query(`
           CREATE TABLE IF NOT EXISTS branches (
@@ -828,11 +753,8 @@ function initializeServer(callback) {
 
 app.get('/api/public/branches', (req, res) => {
   db.query('SELECT id, name, address FROM branches', (err, branches) => {
-    if (err) {
-      console.error('Ошибка получения филиалов:', err);
-      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    }
-    res.json(branches || []);
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    res.json(branches);
   });
 });
 
@@ -901,11 +823,6 @@ app.get('/api/public/sauces', (req, res) => {
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
     
-    // Если таблица не существует или пуста, возвращаем пустой массив
-    if (!sauces || sauces.length === 0) {
-      return res.json([]);
-    }
-    
     const saucesWithUrls = sauces.map(sauce => ({
       id: sauce.id,
       name: sauce.name,
@@ -920,12 +837,6 @@ app.get('/api/public/sauces', (req, res) => {
 // Публичный endpoint для получения соусов конкретного продукта
 app.get('/api/public/products/:productId/sauces', (req, res) => {
   const { productId } = req.params;
-  
-  // Проверка валидности productId
-  if (!productId || isNaN(parseInt(productId))) {
-    return res.status(400).json({ error: 'Неверный ID продукта' });
-  }
-  
   db.query(`
     SELECT s.id, s.name, s.price, s.image
     FROM products_sauces ps
@@ -936,11 +847,6 @@ app.get('/api/public/products/:productId/sauces', (req, res) => {
     if (err) {
       console.error('Ошибка получения соусов продукта:', err);
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    }
-    
-    // Если соусов нет, возвращаем пустой массив
-    if (!sauces || sauces.length === 0) {
-      return res.json([]);
     }
     
     const saucesWithUrls = sauces.map(sauce => ({
@@ -3231,55 +3137,29 @@ app.get('/sms/send', async (req, res) => {
 initializeServer((err) => {
   if (err) {
     console.error('❌ Ошибка инициализации сервера:', err.message);
-    console.warn('⚠️  Продолжаем запуск сервера...');
-    // Не завершаем процесс, чтобы сервер мог работать даже с ошибками инициализации
-  }
-  
-  const PORT = process.env.PORT || 3000;
-  
-  try {
-    const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log(`✅ Сервер запущен на порту ${PORT}`);
-      console.log(`🌐 API доступен по адресу: http://0.0.0.0:${PORT}`);
-      console.log(`📡 Публичные endpoints:`);
-      console.log(`   - GET  /api/public/branches`);
-      console.log(`   - GET  /api/public/branches/:branchId/products`);
-      console.log(`   - GET  /api/public/sauces`);
-      console.log(`   - GET  /api/public/products/:productId/sauces`);
-    });
-    
-    // Обработка ошибок сервера
-    server.on('error', (err) => {
-      console.error('❌ Ошибка сервера:', err);
-      if (err.code === 'EADDRINUSE') {
-        console.error(`❌ Порт ${PORT} уже занят. Попробуйте использовать другой порт.`);
-        process.exit(1);
-      }
-    });
-  } catch (error) {
-    console.error('❌ Критическая ошибка при запуске сервера:', error);
     process.exit(1);
   }
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`✅ Сервер запущен на порту ${PORT}`);
+    console.log(`🌐 API доступен по адресу: http://localhost:${PORT}`);
+    console.log(`📡 Публичные endpoints:`);
+    console.log(`   - GET  /api/public/branches`);
+    console.log(`   - GET  /api/public/branches/:branchId/products`);
+    console.log(`   - GET  /api/public/sauces`);
+    console.log(`   - GET  /api/public/products/:productId/sauces`);
+  });
   
-  // Обработка необработанных исключений
+  // Обработка ошибок сервера
+  app.on('error', (err) => {
+    console.error('❌ Ошибка сервера:', err);
+  });
+  
   process.on('uncaughtException', (err) => {
     console.error('❌ Необработанное исключение:', err);
-    // Не завершаем процесс, чтобы сервер продолжал работать
   });
   
   process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Необработанный rejection:', reason);
-    // Не завершаем процесс, чтобы сервер продолжал работать
-  });
-  
-  // Graceful shutdown
-  process.on('SIGTERM', () => {
-    console.log('SIGTERM получен, завершаем работу...');
-    process.exit(0);
-  });
-  
-  process.on('SIGINT', () => {
-    console.log('SIGINT получен, завершаем работу...');
-    process.exit(0);
   });
 });
