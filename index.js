@@ -11,7 +11,69 @@ const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// Настройка CORS
+const corsOptions = {
+  origin: [
+    'https://americanpizzakg.com',
+    'http://americanpizzakg.com',
+    'https://www.americanpizzakg.com',
+    'http://www.americanpizzakg.com',
+    'https://vasya010-backendtest-260b.twc1.net',
+    'http://vasya010-backendtest-260b.twc1.net',
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:8080',
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400, // 24 часа
+};
+
+app.use(cors(corsOptions));
+
+// Дополнительный middleware для установки CORS заголовков
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    'https://americanpizzakg.com',
+    'http://americanpizzakg.com',
+    'https://www.americanpizzakg.com',
+    'http://www.americanpizzakg.com',
+    'https://vasya010-backendtest-260b.twc1.net',
+    'http://vasya010-backendtest-260b.twc1.net',
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:8080',
+  ];
+  
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (!origin) {
+    // Разрешаем запросы без origin (например, из Postman)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  
+  // Обработка preflight запросов
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  
+  next();
+});
+
+// Обработка preflight запросов
+app.options('*', cors(corsOptions));
+
 app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key_very_secure_random_string';
@@ -84,6 +146,16 @@ const db = mysql.createPool({
   acquireTimeout: 10000,
   waitForConnections: true,
   queueLimit: 0,
+});
+
+// Обработка ошибок подключения к БД
+db.on('error', (err) => {
+  console.error('❌ Ошибка подключения к MySQL:', err);
+  if (err.code === 'PROTOCOL_CONNECTION_LOST') {
+    console.log('🔄 Переподключение к MySQL...');
+  } else {
+    throw err;
+  }
 });
 
 function authenticateToken(req, res, next) {
@@ -608,41 +680,6 @@ function initializeServer(callback) {
               connection.release();
               return callback(err);
             }
-            createUtensilsTable();
-          });
-        }
-        function createUtensilsTable() {
-          connection.query(`
-            CREATE TABLE IF NOT EXISTS utensils (
-              id INT AUTO_INCREMENT PRIMARY KEY,
-              name VARCHAR(255) NOT NULL,
-              price DECIMAL(10,2) NOT NULL DEFAULT 0,
-              image VARCHAR(255) DEFAULT NULL,
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-          `, (err) => {
-            if (err) {
-              connection.release();
-              return callback(err);
-            }
-            createOrdersUtensilsTable();
-          });
-        }
-        function createOrdersUtensilsTable() {
-          connection.query(`
-            CREATE TABLE IF NOT EXISTS orders_utensils (
-              order_id VARCHAR(255) NOT NULL,
-              utensil_id INT NOT NULL,
-              quantity INT NOT NULL DEFAULT 1,
-              PRIMARY KEY (order_id, utensil_id),
-              FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
-              FOREIGN KEY (utensil_id) REFERENCES utensils(id) ON DELETE CASCADE
-            )
-          `, (err) => {
-            if (err) {
-              connection.release();
-              return callback(err);
-            }
             createProductPromoCodesTable();
           });
         }
@@ -778,8 +815,11 @@ function initializeServer(callback) {
 
 app.get('/api/public/branches', (req, res) => {
   db.query('SELECT id, name, address FROM branches', (err, branches) => {
-    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    res.json(branches);
+    if (err) {
+      console.error('Ошибка получения филиалов:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    res.json(branches || []);
   });
 });
 
@@ -848,6 +888,11 @@ app.get('/api/public/sauces', (req, res) => {
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
     
+    // Если таблица не существует или пуста, возвращаем пустой массив
+    if (!sauces || sauces.length === 0) {
+      return res.json([]);
+    }
+    
     const saucesWithUrls = sauces.map(sauce => ({
       id: sauce.id,
       name: sauce.name,
@@ -862,6 +907,12 @@ app.get('/api/public/sauces', (req, res) => {
 // Публичный endpoint для получения соусов конкретного продукта
 app.get('/api/public/products/:productId/sauces', (req, res) => {
   const { productId } = req.params;
+  
+  // Проверка валидности productId
+  if (!productId || isNaN(parseInt(productId))) {
+    return res.status(400).json({ error: 'Неверный ID продукта' });
+  }
+  
   db.query(`
     SELECT s.id, s.name, s.price, s.image
     FROM products_sauces ps
@@ -874,6 +925,11 @@ app.get('/api/public/products/:productId/sauces', (req, res) => {
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
     
+    // Если соусов нет, возвращаем пустой массив
+    if (!sauces || sauces.length === 0) {
+      return res.json([]);
+    }
+    
     const saucesWithUrls = sauces.map(sauce => ({
       id: sauce.id,
       name: sauce.name,
@@ -882,25 +938,6 @@ app.get('/api/public/products/:productId/sauces', (req, res) => {
     }));
     
     res.json(saucesWithUrls);
-  });
-});
-
-// Публичный endpoint для получения всех приборов
-app.get('/api/public/utensils', (req, res) => {
-  db.query('SELECT id, name, price, image FROM utensils ORDER BY name', (err, utensils) => {
-    if (err) {
-      console.error('Ошибка получения приборов:', err);
-      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-    }
-    
-    const utensilsWithUrls = utensils.map(utensil => ({
-      id: utensil.id,
-      name: utensil.name,
-      price: parseFloat(utensil.price) || 0,
-      image: utensil.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${utensil.image.split('/').pop()}` : null
-    }));
-    
-    res.json(utensilsWithUrls);
   });
 });
 
@@ -960,7 +997,7 @@ app.post('/api/public/validate-promo', (req, res) => {
 });
 
 app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
-  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed, utensils } = req.body;
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId, paymentMethod, cashbackUsed } = req.body;
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: 'Корзина пуста или содержит некорректные данные' });
   }
@@ -1101,10 +1138,6 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
       }
     };
     
-    const utensilsText = utensils && Array.isArray(utensils) && utensils.length > 0
-      ? `🍴 *Приборы:*\n${utensils.map((u) => `- ${escapeMarkdown(u.name)} (${u.quantity || 1} шт.)`).join('\n')}\n`
-      : '';
-    
     const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
@@ -1115,7 +1148,7 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
 💳 Способ оплаты: ${escapeMarkdown(paymentMethodText)}
 🛒 *Товары:*
 ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт. по ${item.originalPrice} сом)`).join('\n')}
-${utensilsText}💰 Сумма товаров: ${total.toFixed(2)} сом
+💰 Сумма товаров: ${total.toFixed(2)} сом
 ${discount > 0 ? `💸 Скидка (${discount}%): -${(total * discount / 100).toFixed(2)} сом` : ''}
 ${cashbackUsedAmount > 0 ? `🎁 Кешбэк использован: -${cashbackUsedAmount.toFixed(2)} сом` : ''}
 ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toFixed(2)} сом` : ''}
@@ -1141,40 +1174,17 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         const orderId = result.insertId;
         
-        // Сохраняем приборы для заказа
-        if (utensils && Array.isArray(utensils) && utensils.length > 0) {
-          let utensilsInserted = 0;
-          utensils.forEach((utensil) => {
-            db.query(
-              'INSERT INTO orders_utensils (order_id, utensil_id, quantity) VALUES (?, ?, ?)',
-              [orderId, utensil.id, utensil.quantity || 1],
-              (err) => {
-                if (err) {
-                  console.error('Ошибка сохранения прибора:', err);
-                }
-                utensilsInserted++;
-                if (utensilsInserted === utensils.length) {
-                  continueWithOrder();
-                }
-              }
-            );
-          });
-        } else {
-          continueWithOrder();
+        // Обновляем order_id в транзакциях кешбэка
+        if (userId && userPhone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
+          db.query(
+            'UPDATE cashback_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
+            [orderId, userPhone],
+            () => {}
+          );
         }
         
-        function continueWithOrder() {
-          // Обновляем order_id в транзакциях кешбэка
-          if (userId && userPhone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
-            db.query(
-              'UPDATE cashback_transactions SET order_id = ? WHERE phone = ? AND order_id IS NULL ORDER BY created_at DESC LIMIT 2',
-              [orderId, userPhone],
-              () => {}
-            );
-          }
-          
-          // Обрабатываем кешбэк, затем отправляем в Telegram
-          processCashback(() => {
+        // Обрабатываем кешбэк, затем отправляем в Telegram
+        processCashback(() => {
           axios.post(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
             {
@@ -1198,7 +1208,6 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
             return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
           });
         });
-        }
       }
     );
     }); // Закрываем getUserPhone callback
@@ -3207,7 +3216,31 @@ app.get('/sms/send', async (req, res) => {
 });
 
 initializeServer((err) => {
-  if (err) process.exit(1);
+  if (err) {
+    console.error('❌ Ошибка инициализации сервера:', err.message);
+    process.exit(1);
+  }
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT);
+  app.listen(PORT, () => {
+    console.log(`✅ Сервер запущен на порту ${PORT}`);
+    console.log(`🌐 API доступен по адресу: http://localhost:${PORT}`);
+    console.log(`📡 Публичные endpoints:`);
+    console.log(`   - GET  /api/public/branches`);
+    console.log(`   - GET  /api/public/branches/:branchId/products`);
+    console.log(`   - GET  /api/public/sauces`);
+    console.log(`   - GET  /api/public/products/:productId/sauces`);
+  });
+  
+  // Обработка ошибок сервера
+  app.on('error', (err) => {
+    console.error('❌ Ошибка сервера:', err);
+  });
+  
+  process.on('uncaughtException', (err) => {
+    console.error('❌ Необработанное исключение:', err);
+  });
+  
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Необработанный rejection:', reason);
+  });
 });
