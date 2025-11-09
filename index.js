@@ -815,44 +815,152 @@ app.get('/api/public/branches/:branchId/products', (req, res) => {
   });
 });
 
-// Публичный endpoint для получения всех соусов
+// Публичный endpoint для получения всех соусов с фильтрацией и поиском
 app.get('/api/public/sauces', (req, res) => {
-  db.query('SELECT id, name, price, image FROM sauces ORDER BY name', (err, sauces) => {
+  const { search, sort = 'name', order = 'ASC', limit, offset, branchId } = req.query;
+  
+  // Валидация параметров сортировки
+  const validSortFields = ['name', 'price', 'created_at'];
+  const validOrders = ['ASC', 'DESC'];
+  const sortField = validSortFields.includes(sort) ? sort : 'name';
+  const sortOrder = validOrders.includes(order.toUpperCase()) ? order.toUpperCase() : 'ASC';
+  
+  // Построение запроса
+  let query = 'SELECT s.id, s.name, s.price, s.image, s.created_at';
+  let whereConditions = [];
+  let queryParams = [];
+  
+  // Поиск по названию
+  if (search) {
+    whereConditions.push('s.name LIKE ?');
+    queryParams.push(`%${search}%`);
+  }
+  
+  // Фильтрация по филиалу (соусы доступные для продуктов филиала)
+  if (branchId) {
+    query += `, COUNT(DISTINCT ps.product_id) as usage_count`;
+    query += ` FROM sauces s`;
+    query += ` LEFT JOIN products_sauces ps ON s.id = ps.sauce_id`;
+    query += ` LEFT JOIN products p ON ps.product_id = p.id`;
+    if (whereConditions.length > 0) {
+      query += ` WHERE ${whereConditions.join(' AND ')} AND (p.branch_id = ? OR p.branch_id IS NULL)`;
+    } else {
+      query += ` WHERE (p.branch_id = ? OR p.branch_id IS NULL)`;
+    }
+    queryParams.push(branchId);
+    query += ` GROUP BY s.id`;
+  } else {
+    query += ` FROM sauces s`;
+    if (whereConditions.length > 0) {
+      query += ` WHERE ${whereConditions.join(' AND ')}`;
+    }
+  }
+  
+  // Сортировка
+  query += ` ORDER BY s.${sortField} ${sortOrder}`;
+  
+  // Пагинация
+  if (limit) {
+    const limitNum = parseInt(limit) || 50;
+    const offsetNum = parseInt(offset) || 0;
+    query += ` LIMIT ? OFFSET ?`;
+    queryParams.push(limitNum, offsetNum);
+  }
+  
+  db.query(query, queryParams, (err, sauces) => {
     if (err) {
       console.error('Ошибка получения соусов:', err);
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
     
     if (!sauces || sauces.length === 0) {
-      return res.json([]);
+      return res.json({
+        sauces: [],
+        total: 0,
+        limit: limit ? parseInt(limit) : null,
+        offset: offset ? parseInt(offset) : null
+      });
     }
     
     const saucesWithUrls = sauces.map(sauce => ({
       id: sauce.id,
       name: sauce.name || '',
       price: parseFloat(sauce.price) || 0,
-      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null
+      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null,
+      created_at: sauce.created_at,
+      ...(sauce.usage_count !== undefined && { usage_count: sauce.usage_count })
     }));
     
-    res.json(saucesWithUrls);
+    // Получаем общее количество для пагинации
+    if (limit || search || branchId) {
+      let countQuery = 'SELECT COUNT(DISTINCT s.id) as total FROM sauces s';
+      let countParams = [];
+      
+      if (branchId) {
+        countQuery += ` LEFT JOIN products_sauces ps ON s.id = ps.sauce_id`;
+        countQuery += ` LEFT JOIN products p ON ps.product_id = p.id`;
+      }
+      
+      if (search || branchId) {
+        countQuery += ' WHERE ';
+        let countConditions = [];
+        if (search) {
+          countConditions.push('s.name LIKE ?');
+          countParams.push(`%${search}%`);
+        }
+        if (branchId) {
+          countConditions.push('(p.branch_id = ? OR p.branch_id IS NULL)');
+          countParams.push(branchId);
+        }
+        countQuery += countConditions.join(' AND ');
+      }
+      
+      db.query(countQuery, countParams, (countErr, countResult) => {
+        if (countErr) {
+          console.error('Ошибка подсчета соусов:', countErr);
+          return res.json({
+            sauces: saucesWithUrls,
+            total: saucesWithUrls.length,
+            limit: limit ? parseInt(limit) : null,
+            offset: offset ? parseInt(offset) : null
+          });
+        }
+        
+        res.json({
+          sauces: saucesWithUrls,
+          total: countResult[0].total || saucesWithUrls.length,
+          limit: limit ? parseInt(limit) : null,
+          offset: offset ? parseInt(offset) : null
+        });
+      });
+    } else {
+      res.json(saucesWithUrls);
+    }
   });
 });
 
 // Публичный endpoint для получения соусов конкретного продукта
 app.get('/api/public/products/:productId/sauces', (req, res) => {
   const { productId } = req.params;
+  const { sort = 'name', order = 'ASC' } = req.query;
   
   // Валидация productId
   if (!productId || isNaN(parseInt(productId))) {
     return res.status(400).json({ error: 'Некорректный ID продукта' });
   }
   
+  // Валидация параметров сортировки
+  const validSortFields = ['name', 'price'];
+  const validOrders = ['ASC', 'DESC'];
+  const sortField = validSortFields.includes(sort) ? sort : 'name';
+  const sortOrder = validOrders.includes(order.toUpperCase()) ? order.toUpperCase() : 'ASC';
+  
   db.query(`
-    SELECT s.id, s.name, s.price, s.image
+    SELECT s.id, s.name, s.price, s.image, s.created_at
     FROM products_sauces ps
     LEFT JOIN sauces s ON ps.sauce_id = s.id
     WHERE ps.product_id = ? AND s.id IS NOT NULL
-    ORDER BY s.name
+    ORDER BY s.${sortField} ${sortOrder}
   `, [productId], (err, sauces) => {
     if (err) {
       console.error('Ошибка получения соусов продукта:', err);
@@ -867,7 +975,117 @@ app.get('/api/public/products/:productId/sauces', (req, res) => {
       id: sauce.id,
       name: sauce.name || '',
       price: parseFloat(sauce.price) || 0,
-      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null
+      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null,
+      created_at: sauce.created_at
+    }));
+    
+    res.json(saucesWithUrls);
+  });
+});
+
+// Публичный endpoint для получения соусов по филиалу
+app.get('/api/public/branches/:branchId/sauces', (req, res) => {
+  const { branchId } = req.params;
+  const { search, sort = 'name', order = 'ASC' } = req.query;
+  
+  // Валидация branchId
+  if (!branchId || isNaN(parseInt(branchId))) {
+    return res.status(400).json({ error: 'Некорректный ID филиала' });
+  }
+  
+  // Валидация параметров сортировки
+  const validSortFields = ['name', 'price', 'usage_count'];
+  const validOrders = ['ASC', 'DESC'];
+  const sortField = validSortFields.includes(sort) ? sort : 'name';
+  const sortOrder = validOrders.includes(order.toUpperCase()) ? order.toUpperCase() : 'ASC';
+  
+  let query = `
+    SELECT DISTINCT s.id, s.name, s.price, s.image, s.created_at,
+           COUNT(DISTINCT ps.product_id) as usage_count
+    FROM sauces s
+    INNER JOIN products_sauces ps ON s.id = ps.sauce_id
+    INNER JOIN products p ON ps.product_id = p.id
+    WHERE p.branch_id = ?
+  `;
+  let queryParams = [branchId];
+  
+  // Поиск по названию
+  if (search) {
+    query += ` AND s.name LIKE ?`;
+    queryParams.push(`%${search}%`);
+  }
+  
+  query += ` GROUP BY s.id`;
+  // Безопасная сортировка
+  if (sortField === 'usage_count') {
+    query += ` ORDER BY usage_count ${sortOrder}`;
+  } else {
+    query += ` ORDER BY s.${sortField} ${sortOrder}`;
+  }
+  
+  db.query(query, queryParams, (err, sauces) => {
+    if (err) {
+      console.error('Ошибка получения соусов филиала:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    
+    if (!sauces || sauces.length === 0) {
+      return res.json([]);
+    }
+    
+    const saucesWithUrls = sauces.map(sauce => ({
+      id: sauce.id,
+      name: sauce.name || '',
+      price: parseFloat(sauce.price) || 0,
+      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null,
+      created_at: sauce.created_at,
+      usage_count: sauce.usage_count || 0
+    }));
+    
+    res.json(saucesWithUrls);
+  });
+});
+
+// Публичный endpoint для получения популярных соусов
+app.get('/api/public/sauces/popular', (req, res) => {
+  const { limit = 10, branchId } = req.query;
+  const limitNum = Math.min(parseInt(limit) || 10, 50);
+  
+  let query = `
+    SELECT s.id, s.name, s.price, s.image, s.created_at,
+           COUNT(DISTINCT ps.product_id) as usage_count
+    FROM sauces s
+    INNER JOIN products_sauces ps ON s.id = ps.sauce_id
+  `;
+  let queryParams = [];
+  
+  if (branchId) {
+    query += ` INNER JOIN products p ON ps.product_id = p.id WHERE p.branch_id = ?`;
+    queryParams.push(branchId);
+  }
+  
+  query += ` GROUP BY s.id`;
+  query += ` ORDER BY usage_count DESC, s.name ASC`;
+  query += ` LIMIT ?`;
+  queryParams.push(limitNum);
+  
+  db.query(query, queryParams, (err, sauces) => {
+    if (err) {
+      console.error('Ошибка получения популярных соусов:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    
+    if (!sauces || sauces.length === 0) {
+      return res.json([]);
+    }
+    
+    const saucesWithUrls = sauces.map(sauce => ({
+      id: sauce.id,
+      name: sauce.name || '',
+      price: parseFloat(sauce.price) || 0,
+      image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null,
+      created_at: sauce.created_at,
+      usage_count: sauce.usage_count || 0
     }));
     
     res.json(saucesWithUrls);
@@ -3160,8 +3378,10 @@ initializeServer((err) => {
     console.log(`📡 Публичные endpoints:`);
     console.log(`   - GET  /api/public/branches`);
     console.log(`   - GET  /api/public/branches/:branchId/products`);
-    console.log(`   - GET  /api/public/sauces`);
-    console.log(`   - GET  /api/public/products/:productId/sauces`);
+    console.log(`   - GET  /api/public/sauces (с фильтрацией: search, sort, order, limit, offset, branchId)`);
+    console.log(`   - GET  /api/public/products/:productId/sauces (с сортировкой: sort, order)`);
+    console.log(`   - GET  /api/public/branches/:branchId/sauces (с поиском и сортировкой)`);
+    console.log(`   - GET  /api/public/sauces/popular (с параметрами: limit, branchId)`);
   });
   
   // Обработка ошибок сервера
