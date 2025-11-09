@@ -823,9 +823,13 @@ app.get('/api/public/sauces', (req, res) => {
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
     
+    if (!sauces || sauces.length === 0) {
+      return res.json([]);
+    }
+    
     const saucesWithUrls = sauces.map(sauce => ({
       id: sauce.id,
-      name: sauce.name,
+      name: sauce.name || '',
       price: parseFloat(sauce.price) || 0,
       image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null
     }));
@@ -837,6 +841,12 @@ app.get('/api/public/sauces', (req, res) => {
 // Публичный endpoint для получения соусов конкретного продукта
 app.get('/api/public/products/:productId/sauces', (req, res) => {
   const { productId } = req.params;
+  
+  // Валидация productId
+  if (!productId || isNaN(parseInt(productId))) {
+    return res.status(400).json({ error: 'Некорректный ID продукта' });
+  }
+  
   db.query(`
     SELECT s.id, s.name, s.price, s.image
     FROM products_sauces ps
@@ -849,9 +859,13 @@ app.get('/api/public/products/:productId/sauces', (req, res) => {
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
     
+    if (!sauces || sauces.length === 0) {
+      return res.json([]);
+    }
+    
     const saucesWithUrls = sauces.map(sauce => ({
       id: sauce.id,
-      name: sauce.name,
+      name: sauce.name || '',
       price: parseFloat(sauce.price) || 0,
       image: sauce.image ? `https://nukesul-brepb-651f.twc1.net/product-image/${sauce.image.split('/').pop()}` : null
     }));
