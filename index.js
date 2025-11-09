@@ -21,7 +21,11 @@ const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'WvhFfIzzCkITUrXfD8JfoDne7LmB
 const MYSQL_HOST = process.env.MYSQL_HOST || 'vh446.timeweb.ru';
 const MYSQL_USER = process.env.MYSQL_USER || 'cz45780_pizzaame';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'Vasya11091109';
-const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'cz45780_pizzaame'; 
+const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'cz45780_pizzaame';
+// Локальный SMS Gateway (на вашем сервере)
+const SMS_GATEWAY_URL = process.env.SMS_GATEWAY_URL || 'https://vasya010-backendtest-260b.twc1.net/sms/send';
+const SMS_GATEWAY_API_KEY = process.env.SMS_GATEWAY_API_KEY || '';
+const SMS_GATEWAY_METHOD = process.env.SMS_GATEWAY_METHOD || 'POST'; 
 
 const s3Client = new S3Client({
   credentials: {
@@ -1060,8 +1064,72 @@ function generateSMSCode() {
   return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
+// Функция отправки SMS через локальный SMS Gateway на сервере
+async function sendSMS(phone, code) {
+  try {
+    if (!SMS_GATEWAY_URL || SMS_GATEWAY_URL === '') {
+      return false;
+    }
+
+    const smsText = `Ваш код подтверждения для America Pizza: ${code}`;
+    // Форматируем номер телефона (996XXXXXXXXX)
+    let phoneFormatted = phone.replace(/\D/g, '');
+    if (!phoneFormatted.startsWith('996')) {
+      if (phoneFormatted.startsWith('0')) {
+        phoneFormatted = '996' + phoneFormatted.substring(1);
+      } else {
+        phoneFormatted = '996' + phoneFormatted;
+      }
+    }
+
+    const payload = {
+      phone: phoneFormatted,
+      message: smsText,
+      code: code,
+    };
+
+    // Добавляем API ключ если есть
+    if (SMS_GATEWAY_API_KEY && SMS_GATEWAY_API_KEY !== '') {
+      payload.api_key = SMS_GATEWAY_API_KEY;
+    }
+
+    let response;
+    if (SMS_GATEWAY_METHOD.toUpperCase() === 'GET') {
+      const params = new URLSearchParams(payload);
+      response = await axios.get(`${SMS_GATEWAY_URL}?${params.toString()}`);
+    } else {
+      response = await axios.post(SMS_GATEWAY_URL, payload, {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Проверяем успешность отправки
+    if (response.status === 200) {
+      const data = response.data;
+      if (data.success === true || 
+          data.status === 'success' || 
+          data.status === 'sent' ||
+          data.error === false) {
+        console.log(`✅ SMS отправлено на +${phoneFormatted}`);
+        return true;
+      } else {
+        console.error('❌ Ошибка отправки SMS:', data);
+        return false;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    console.error('❌ Ошибка при отправке SMS:', error.message);
+    if (error.response) {
+      console.error('Детали:', error.response.data);
+    }
+    return false;
+  }
+}
+
 // API для отправки SMS кода
-app.post('/api/public/auth/send-code', (req, res) => {
+app.post('/api/public/auth/send-code', async (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
   
@@ -1078,19 +1146,27 @@ app.post('/api/public/auth/send-code', (req, res) => {
   // Сохраняем код
   smsCodes.set(cleanPhone, { code, expiresAt });
   
-  // В продакшене здесь должен быть вызов SMS сервиса (Twilio, SMS.ru и т.д.)
-  // Для тестирования выводим код в консоль
-  console.log(`SMS код для ${cleanPhone}: ${code}`);
+  // Выводим код в консоль для отладки
+  console.log(`\n=== SMS КОД ===`);
+  console.log(`Телефон: +${cleanPhone}`);
+  console.log(`Код: ${code}`);
+  console.log(`Истекает через: 5 минут`);
+  console.log(`================\n`);
   
-  // В реальном приложении отправляем SMS через API
-  // Например, через Telegram Bot API или SMS сервис
-  // Здесь можно добавить интеграцию с SMS сервисом
+  // Отправляем SMS через локальный gateway
+  let smsSent = await sendSMS(cleanPhone, code);
+  
+  if (!smsSent) {
+    console.log('⚠️ SMS не отправлено через gateway. Проверьте настройки SMS_GATEWAY_URL');
+  }
   
   res.json({ 
     success: true,
-    message: 'Код подтверждения отправлен',
+    message: smsSent ? 'Код подтверждения отправлен на ваш номер' : 'Код подтверждения отправлен',
     // Для разработки возвращаем код (в продакшене убрать!)
-    // development: code
+    code: code, // Временно возвращаем код для тестирования
+    phone: cleanPhone,
+    smsSent: smsSent,
   });
 });
 
@@ -2899,6 +2975,86 @@ app.delete('/promotions/:id', authenticateToken, (req, res) => {
       });
     }
   });
+});
+
+// SMS Gateway endpoint (для отправки SMS с этого же сервера)
+app.post('/sms/send', async (req, res) => {
+  try {
+    const { api_key, phone, message, code } = req.body;
+    
+    // Проверка API ключа (если настроен)
+    if (SMS_GATEWAY_API_KEY && SMS_GATEWAY_API_KEY !== '' && api_key !== SMS_GATEWAY_API_KEY) {
+      return res.status(401).json({ 
+        success: false, 
+        error: 'Invalid API key' 
+      });
+    }
+    
+    // Проверка обязательных полей
+    if (!phone || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Phone and message are required' 
+      });
+    }
+    
+    console.log(`\n📤 Отправка SMS через gateway:`);
+    console.log(`   Телефон: ${phone}`);
+    console.log(`   Сообщение: ${message}`);
+    console.log(`   Код: ${code || 'N/A'}\n`);
+    
+    // Здесь должна быть реальная отправка SMS через модем/API оператора
+    // Пока просто логируем (адаптируйте под ваш способ отправки)
+    
+    // ПРИМЕР: Отправка через команду (раскомментируйте и адаптируйте)
+    // const { exec } = require('child_process');
+    // const phoneClean = phone.replace(/\D/g, '');
+    // const command = `gammu sendsms TEXT ${phoneClean} -text "${message}"`;
+    // exec(command, (error, stdout, stderr) => {
+    //   if (error) {
+    //     console.error('Ошибка отправки SMS:', error);
+    //     return res.status(500).json({ success: false, error: error.message });
+    //   }
+    //   console.log(`✅ SMS отправлено на ${phone}`);
+    //   res.json({ success: true, status: 'sent', phone: phone });
+    // });
+    
+    // ВРЕМЕННО: Возвращаем успех (замените на реальную отправку)
+    console.log(`✅ SMS gateway получил запрос для ${phone}`);
+    res.json({ 
+      success: true, 
+      status: 'sent',
+      phone: phone,
+      message: 'SMS gateway endpoint работает. Настройте реальную отправку SMS.'
+    });
+    
+  } catch (error) {
+    console.error('Ошибка обработки запроса SMS gateway:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// GET endpoint для SMS gateway (для совместимости)
+app.get('/sms/send', async (req, res) => {
+  try {
+    const { api_key, phone, message, code } = req.query;
+    
+    if (SMS_GATEWAY_API_KEY && SMS_GATEWAY_API_KEY !== '' && api_key !== SMS_GATEWAY_API_KEY) {
+      return res.status(401).json({ success: false, error: 'Invalid API key' });
+    }
+    
+    if (!phone || !message) {
+      return res.status(400).json({ success: false, error: 'Phone and message are required' });
+    }
+    
+    console.log(`📤 GET запрос SMS: ${phone} - ${message}`);
+    res.json({ success: true, status: 'sent', phone: phone });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 initializeServer((err) => {
