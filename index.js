@@ -995,7 +995,109 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
   });
 });
 
-// API для входа/регистрации по телефону
+// Хранилище для SMS кодов (в продакшене использовать Redis или БД)
+const smsCodes = new Map();
+
+// Генерация 4-значного кода
+function generateSMSCode() {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+}
+
+// API для отправки SMS кода
+app.post('/api/public/auth/send-code', (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
+  
+  // Очищаем телефон от лишних символов
+  const cleanPhone = phone.replace(/\D/g, '');
+  if (cleanPhone.length < 10) {
+    return res.status(400).json({ error: 'Некорректный номер телефона' });
+  }
+  
+  // Генерируем код
+  const code = generateSMSCode();
+  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 минут
+  
+  // Сохраняем код
+  smsCodes.set(cleanPhone, { code, expiresAt });
+  
+  // В продакшене здесь должен быть вызов SMS сервиса (Twilio, SMS.ru и т.д.)
+  // Для тестирования выводим код в консоль
+  console.log(`SMS код для ${cleanPhone}: ${code}`);
+  
+  // В реальном приложении отправляем SMS через API
+  // Например, через Telegram Bot API или SMS сервис
+  // Здесь можно добавить интеграцию с SMS сервисом
+  
+  res.json({ 
+    success: true,
+    message: 'Код подтверждения отправлен',
+    // Для разработки возвращаем код (в продакшене убрать!)
+    // development: code
+  });
+});
+
+// API для проверки SMS кода и входа/регистрации
+app.post('/api/public/auth/verify-code', (req, res) => {
+  const { phone, code } = req.body;
+  if (!phone || !code) {
+    return res.status(400).json({ error: 'Телефон и код обязательны' });
+  }
+  
+  // Очищаем телефон от лишних символов
+  const cleanPhone = phone.replace(/\D/g, '');
+  if (cleanPhone.length < 10) {
+    return res.status(400).json({ error: 'Некорректный номер телефона' });
+  }
+  
+  // Проверяем код
+  const stored = smsCodes.get(cleanPhone);
+  if (!stored) {
+    return res.status(400).json({ error: 'Код не найден. Запросите новый код.' });
+  }
+  
+  if (Date.now() > stored.expiresAt) {
+    smsCodes.delete(cleanPhone);
+    return res.status(400).json({ error: 'Код истек. Запросите новый код.' });
+  }
+  
+  if (stored.code !== code) {
+    return res.status(400).json({ error: 'Неверный код подтверждения' });
+  }
+  
+  // Код верный, удаляем его
+  smsCodes.delete(cleanPhone);
+  
+  // Проверяем, существует ли пользователь
+  db.query('SELECT * FROM app_users WHERE phone = ?', [cleanPhone], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    
+    if (users.length === 0) {
+      // Регистрация нового пользователя
+      db.query('INSERT INTO app_users (phone) VALUES (?)', [cleanPhone], (err, result) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        
+        const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ 
+          token, 
+          user: { id: result.insertId, phone: cleanPhone, name: null },
+          isNewUser: true
+        });
+      });
+    } else {
+      // Вход существующего пользователя
+      const user = users[0];
+      const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+      res.json({ 
+        token, 
+        user: { id: user.id, phone: user.phone, name: user.name },
+        isNewUser: false
+      });
+    }
+  });
+});
+
+// API для входа/регистрации по телефону (старый метод, оставляем для совместимости)
 app.post('/api/public/auth/phone', (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
