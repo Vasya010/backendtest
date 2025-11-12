@@ -23,7 +23,7 @@ const MYSQL_USER = process.env.MYSQL_USER || 'cz45780_pizzaame';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'Vasya11091109';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'cz45780_pizzaame';
 // Локальный SMS Gateway (на вашем сервере)
-const SMS_GATEWAY_URL = process.env.SMS_GATEWAY_URL || 'https://vasya010-backendtest-260b.twc1.net/sms/send';
+const SMS_GATEWAY_URL = process.env.SMS_GATEWAY_URL || 'https://vasya010-red-bdf5.twc1.net/sms/send';
 const SMS_GATEWAY_API_KEY = process.env.SMS_GATEWAY_API_KEY || '';
 const SMS_GATEWAY_METHOD = process.env.SMS_GATEWAY_METHOD || 'POST'; 
 
@@ -329,7 +329,7 @@ function initializeServer(callback) {
               id INT AUTO_INCREMENT PRIMARY KEY,
               branch_id INT NOT NULL,
               total DECIMAL(10,2) NOT NULL,
-              status ENUM('pending', 'processing', 'completed', 'cancelled') DEFAULT 'pending',
+              status ENUM('pending', 'accepted', 'preparing', 'sent', 'on_way', 'delivered', 'cancelled') DEFAULT 'pending',
               order_details JSON,
               delivery_details JSON,
               cart_items JSON,
@@ -355,12 +355,63 @@ function initializeServer(callback) {
                     connection.release();
                     return callback(err);
                   }
-                  createCashbackTables();
+                  // Добавляем поле user_id если его нет
+                  connection.query('SHOW COLUMNS FROM orders LIKE "user_id"', (err, userIdColumns) => {
+                    if (err) {
+                      connection.release();
+                      return callback(err);
+                    }
+                    if (userIdColumns.length === 0) {
+                      connection.query('ALTER TABLE orders ADD COLUMN user_id INT, ADD FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE SET NULL', (err) => {
+                        if (err) {
+                          connection.release();
+                          return callback(err);
+                        }
+                        updateOrderStatusEnum();
+                      });
+                    } else {
+                      updateOrderStatusEnum();
+                    }
+                  });
                 });
               } else {
-                createCashbackTables();
+                // Проверяем user_id даже если cashback_used уже есть
+                connection.query('SHOW COLUMNS FROM orders LIKE "user_id"', (err, userIdColumns) => {
+                  if (err) {
+                    connection.release();
+                    return callback(err);
+                  }
+                  if (userIdColumns.length === 0) {
+                    connection.query('ALTER TABLE orders ADD COLUMN user_id INT, ADD FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE SET NULL', (err) => {
+                      if (err) {
+                        connection.release();
+                        return callback(err);
+                      }
+                      updateOrderStatusEnum();
+                    });
+                  } else {
+                    updateOrderStatusEnum();
+                  }
+                });
               }
             });
+            
+            // Обновляем ENUM статусов заказа
+            function updateOrderStatusEnum() {
+              connection.query(`
+                ALTER TABLE orders 
+                MODIFY COLUMN status ENUM('pending', 'accepted', 'preparing', 'sent', 'on_way', 'delivered', 'cancelled') DEFAULT 'pending'
+              `, (err) => {
+                if (err) {
+                  // Игнорируем ошибки, если ENUM уже обновлен
+                  console.log('Статусы заказов уже обновлены или ошибка:', err.message);
+                }
+                // Обновляем старые статусы на новые
+                connection.query(`UPDATE orders SET status = 'accepted' WHERE status = 'processing'`, () => {});
+                connection.query(`UPDATE orders SET status = 'delivered' WHERE status = 'completed'`, () => {});
+                createCashbackTables();
+              });
+            }
           });
         }
         function createCashbackTables() {
@@ -715,7 +766,44 @@ function initializeServer(callback) {
           });
         }
         function createAdminUser() {
-          connection.query('SELECT * FROM users WHERE email = ?', ['admin@ameranpizza.com'], (err, users) => {
+          // Создаем таблицы для заявок на карты и курьеров
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS card_requests (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              user_id INT,
+              first_name VARCHAR(100) NOT NULL,
+              last_name VARCHAR(100) NOT NULL,
+              phone VARCHAR(20) NOT NULL,
+              status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE SET NULL,
+              INDEX idx_status (status),
+              INDEX idx_user_id (user_id)
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
+            connection.query(`
+              CREATE TABLE IF NOT EXISTS couriers (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                phone VARCHAR(20) NOT NULL,
+                vehicle VARCHAR(100),
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_is_active (is_active)
+              )
+            `, (err) => {
+              if (err) {
+                connection.release();
+                return callback(err);
+              }
+              // Продолжаем создание админ пользователя
+              connection.query('SELECT * FROM users WHERE email = ?', ['admin@ameranpizza.com'], (err, users) => {
             if (err) {
               connection.release();
               return callback(err);
@@ -1111,7 +1199,7 @@ app.get('/api/public/stories', (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const storiesWithUrls = stories.map(story => ({
       ...story,
-      image: `https://vasya010-backendtest-260b.twc1.net/product-image/${story.image.split('/').pop()}`
+      image: `https://vasya010-red-bdf5.twc1.net/product-image/${story.image.split('/').pop()}`
     }));
     res.json(storiesWithUrls);
   });
@@ -1128,7 +1216,7 @@ app.get('/api/public/banners', (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const bannersWithUrls = banners.map(banner => ({
       ...banner,
-      image: `https://vasya010-backendtest-260b.twc1.net/product-image/${banner.image.split('/').pop()}`
+      image: `https://vasya010-red-bdf5.twc1.net/product-image/${banner.image.split('/').pop()}`
     }));
     res.json(bannersWithUrls);
   });
@@ -1308,8 +1396,8 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
     
     db.query(
       `
-      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code, cashback_used)
-      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code, cashback_used, user_id)
+      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
     `,
       [
         branchId,
@@ -1320,6 +1408,7 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         discount || 0,
         promoCode || null,
         cashbackUsedAmount,
+        userId || null,
       ],
       (err, result) => {
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
@@ -2035,6 +2124,22 @@ app.get('/branches', authenticateToken, (req, res) => {
   db.query('SELECT * FROM branches', (err, branches) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     res.json(branches);
+  });
+});
+
+app.get('/orders', authenticateToken, (req, res) => {
+  db.query(`
+    SELECT o.*, 
+           b.name as branch_name,
+           au.phone as user_phone,
+           au.name as user_name
+    FROM orders o
+    LEFT JOIN branches b ON o.branch_id = b.id
+    LEFT JOIN app_users au ON o.user_id = au.id
+    ORDER BY o.created_at DESC
+  `, (err, orders) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    res.json(orders);
   });
 });
 
@@ -2992,7 +3097,7 @@ app.get('/news', authenticateToken, (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const newsWithUrls = news.map(item => ({
       ...item,
-      image: item.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${item.image.split('/').pop()}` : null
+      image: item.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${item.image.split('/').pop()}` : null
     }));
     res.json(newsWithUrls);
   });
@@ -3017,7 +3122,7 @@ app.post('/news', authenticateToken, (req, res) => {
             const newsItem = rows[0];
             res.status(201).json({
               ...newsItem,
-              image: newsItem.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
+              image: newsItem.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
             });
           });
         }
@@ -3071,7 +3176,7 @@ app.put('/news/:id', authenticateToken, (req, res) => {
               const newsItem = rows[0];
               res.json({
                 ...newsItem,
-                image: newsItem.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
+                image: newsItem.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
               });
             });
           }
@@ -3113,7 +3218,7 @@ function sendPromotionNotifications(promotion, callback) {
       return callback(null, { sent: 0, total: 0 });
     }
 
-    const imageUrl = promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null;
+    const imageUrl = promotion.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${promotion.image.split('/').pop()}` : null;
     const promoText = promotion.promo_code ? ` Промокод: ${promotion.promo_code} (${promotion.discount_percent}%)` : '';
     
     users.forEach((user, index) => {
@@ -3157,7 +3262,7 @@ app.get('/promotions', authenticateToken, (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const promotionsWithUrls = promotions.map(item => ({
       ...item,
-      image: item.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${item.image.split('/').pop()}` : null
+      image: item.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${item.image.split('/').pop()}` : null
     }));
     res.json(promotionsWithUrls);
   });
@@ -3188,7 +3293,7 @@ app.post('/promotions', authenticateToken, (req, res) => {
             const promotion = rows[0];
             const promotionWithUrl = {
               ...promotion,
-              image: promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
+              image: promotion.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
             };
 
             // Отправка уведомлений, если требуется
@@ -3260,7 +3365,7 @@ app.put('/promotions/:id', authenticateToken, (req, res) => {
               const promotion = rows[0];
               res.json({
                 ...promotion,
-                image: promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
+                image: promotion.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
               });
             });
           }
@@ -3364,6 +3469,286 @@ app.get('/sms/send', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// Заказ карты
+app.post('/api/public/order-card', authenticateToken, (req, res) => {
+  const { first_name, last_name, phone } = req.body;
+  const userId = req.user?.id;
+
+  if (!first_name || !last_name || !phone) {
+    return res.status(400).json({ error: 'Все поля обязательны' });
+  }
+
+  // Проверяем, есть ли уже активная заявка
+  db.query(
+    'SELECT * FROM card_requests WHERE user_id = ? AND status = "pending"',
+    [userId],
+    (err, existing) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      if (existing.length > 0) {
+        return res.status(400).json({ error: 'У вас уже есть активная заявка на карту' });
+      }
+
+      // Создаем заявку
+      db.query(
+        'INSERT INTO card_requests (user_id, first_name, last_name, phone, status) VALUES (?, ?, ?, ?, "pending")',
+        [userId, first_name, last_name, phone],
+        (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          
+          // Создаем уведомление для админа
+          db.query(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (NULL, ?, ?, "card_request")',
+            [
+              'Новая заявка на карту',
+              `Пользователь ${first_name} ${last_name} (${phone}) подал заявку на карту`
+            ],
+            () => {}
+          );
+
+          res.json({ 
+            success: true, 
+            message: 'Заявка на карту отправлена. Ожидайте подтверждения администратора.',
+            request_id: result.insertId
+          });
+        }
+      );
+    }
+  );
+});
+
+// Админ: Получить все заявки на карты
+app.get('/card-requests', authenticateToken, (req, res) => {
+  db.query(`
+    SELECT cr.*, 
+           au.phone as user_phone,
+           au.name as user_name
+    FROM card_requests cr
+    LEFT JOIN app_users au ON cr.user_id = au.id
+    ORDER BY cr.created_at DESC
+  `, (err, requests) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    res.json(requests);
+  });
+});
+
+// Админ: Одобрить заявку на карту
+app.put('/card-requests/:id/approve', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  
+  db.query('SELECT * FROM card_requests WHERE id = ?', [id], (err, requests) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (requests.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });
+    
+    const request = requests[0];
+    
+    // Обновляем статус заявки
+    db.query(
+      'UPDATE card_requests SET status = "approved" WHERE id = ?',
+      [id],
+      (err) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        
+        // Создаем карту (добавляем запись в cashback_balance с начальным балансом 0)
+        db.query(
+          'INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level) VALUES (?, 0, 0, 0, "bronze") ON DUPLICATE KEY UPDATE phone = phone',
+          [request.phone],
+          (err) => {
+            if (err) console.error('Ошибка создания карты:', err);
+            
+            // Создаем уведомление для пользователя
+            if (request.user_id) {
+              db.query(
+                'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "card_approved")',
+                [
+                  request.user_id,
+                  'Карта одобрена!',
+                  'Ваша заявка на карту была одобрена. Теперь вы можете получать кешбек с каждого заказа!'
+                ],
+                () => {}
+              );
+            }
+            
+            res.json({ 
+              success: true, 
+              message: 'Заявка одобрена, карта создана',
+              request: { ...request, status: 'approved' }
+            });
+          }
+        );
+      }
+    );
+  });
+});
+
+// Админ: Отклонить заявку на карту
+app.delete('/card-requests/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  
+  db.query('SELECT * FROM card_requests WHERE id = ?', [id], (err, requests) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (requests.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });
+    
+    const request = requests[0];
+    
+    // Обновляем статус на rejected
+    db.query(
+      'UPDATE card_requests SET status = "rejected" WHERE id = ?',
+      [id],
+      (err) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        
+        // Создаем уведомление для пользователя
+        if (request.user_id) {
+          db.query(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "card_rejected")',
+            [
+              request.user_id,
+              'Заявка на карту отклонена',
+              'К сожалению, ваша заявка на карту была отклонена. Свяжитесь с администратором для уточнения деталей.'
+            ],
+            () => {}
+          );
+        }
+        
+        res.json({ success: true, message: 'Заявка отклонена' });
+      }
+    );
+  });
+});
+
+// Админ: Получить всех курьеров
+app.get('/couriers', authenticateToken, (req, res) => {
+  db.query('SELECT * FROM couriers ORDER BY created_at DESC', (err, couriers) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    res.json(couriers);
+  });
+});
+
+// Админ: Создать курьера
+app.post('/couriers', authenticateToken, (req, res) => {
+  const { name, phone, vehicle } = req.body;
+  
+  if (!name || !phone) {
+    return res.status(400).json({ error: 'Имя и телефон обязательны' });
+  }
+  
+  db.query(
+    'INSERT INTO couriers (name, phone, vehicle) VALUES (?, ?, ?)',
+    [name, phone, vehicle || null],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      res.json({ 
+        success: true, 
+        message: 'Курьер создан',
+        courier: { id: result.insertId, name, phone, vehicle }
+      });
+    }
+  );
+});
+
+// Админ: Обновить курьера
+app.put('/couriers/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  const { name, phone, vehicle, is_active } = req.body;
+  
+  db.query(
+    'UPDATE couriers SET name = ?, phone = ?, vehicle = ?, is_active = ? WHERE id = ?',
+    [name, phone, vehicle || null, is_active !== undefined ? is_active : true, id],
+    (err) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      db.query('SELECT * FROM couriers WHERE id = ?', [id], (err, couriers) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        res.json(couriers[0]);
+      });
+    }
+  );
+});
+
+// Админ: Удалить курьера
+app.delete('/couriers/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  db.query('DELETE FROM couriers WHERE id = ?', [id], (err) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    res.json({ success: true, message: 'Курьер удален' });
+  });
+});
+
+// Админ: Обновить статус заказа
+app.put('/orders/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  
+  if (!status) {
+    return res.status(400).json({ error: 'Статус обязателен' });
+  }
+  
+  db.query('SELECT * FROM orders WHERE id = ?', [id], (err, orders) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (orders.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
+    
+    const order = orders[0];
+    
+    db.query(
+      'UPDATE orders SET status = ? WHERE id = ?',
+      [status, id],
+      (err) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        
+        // Получаем user_id из заказа (если есть)
+        const userId = order.user_id;
+        
+        // Создаем уведомление для пользователя
+        if (userId) {
+          const statusMessages = {
+            'accepted': 'Ваш заказ принят!',
+            'preparing': 'Ваш заказ готовится!',
+            'sent': 'Ваш заказ отправлен!',
+            'on_way': 'Ваш заказ в пути!',
+            'delivered': 'Ваш заказ доставлен! Приятного аппетита!',
+            'cancelled': 'Ваш заказ был отменен.'
+          };
+          
+          const statusTitles = {
+            'accepted': 'Заказ принят',
+            'preparing': 'Заказ готовится',
+            'sent': 'Заказ отправлен',
+            'on_way': 'Заказ в пути',
+            'delivered': 'Заказ доставлен',
+            'cancelled': 'Заказ отменен'
+          };
+          
+          db.query(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "order_status")',
+            [
+              userId,
+              statusTitles[status] || 'Статус заказа изменен',
+              statusMessages[status] || `Статус вашего заказа изменен на: ${status}`
+            ],
+            () => {}
+          );
+        }
+        
+        // Отправляем уведомление в телеграм (если настроен)
+        if (order.branch_id) {
+          db.query('SELECT telegram_chat_id FROM branches WHERE id = ?', [order.branch_id], (err, branches) => {
+            if (!err && branches.length > 0 && branches[0].telegram_chat_id && TELEGRAM_BOT_TOKEN) {
+              const chatId = branches[0].telegram_chat_id;
+              const message = `📦 Статус заказа #${id} изменен на: ${status}`;
+              axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                chat_id: chatId,
+                text: message,
+                parse_mode: 'HTML'
+              }).catch(err => console.error('Ошибка отправки в Telegram:', err));
+            }
+          });
+        }
+        
+        res.json({ success: true, message: 'Статус заказа обновлен', order: { ...order, status } });
+      }
+    );
+  });
 });
 
 initializeServer((err) => {
