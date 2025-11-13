@@ -760,6 +760,9 @@ app.get('/api/public/branches', (req, res) => {
 
 app.get('/api/public/branches/:branchId/products', (req, res) => {
   const { branchId } = req.params;
+  const branchIdNum = parseInt(branchId);
+  // Если запрашивается не первый филиал, показываем товары из первого филиала тоже
+  const firstBranchId = 1;
   db.query(`
     SELECT p.id, p.name, p.description, p.price_small, p.price_medium, p.price_large,
            p.price_single AS price, p.image AS image_url, c.name AS category,
@@ -781,9 +784,9 @@ app.get('/api/public/branches/:branchId/products', (req, res) => {
     FROM products p
     LEFT JOIN categories c ON p.category_id = c.id
     LEFT JOIN discounts d ON p.id = d.product_id AND d.is_active = TRUE AND (d.expires_at IS NULL OR d.expires_at > NOW())
-    WHERE p.branch_id = ?
+    WHERE p.branch_id = ? OR (p.branch_id = ? AND ? != ?)
     GROUP BY p.id
-  `, [branchId], (err, products) => {
+  `, [branchId, firstBranchId, branchIdNum, firstBranchId], (err, products) => {
     if (err) {
       console.error('Ошибка получения продуктов:', err);
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
@@ -993,6 +996,9 @@ app.get('/api/public/branches/:branchId/sauces', (req, res) => {
     return res.status(400).json({ error: 'Некорректный ID филиала' });
   }
   
+  const branchIdNum = parseInt(branchId);
+  const firstBranchId = 1;
+  
   // Валидация параметров сортировки
   const validSortFields = ['name', 'price', 'usage_count'];
   const validOrders = ['ASC', 'DESC'];
@@ -1005,9 +1011,9 @@ app.get('/api/public/branches/:branchId/sauces', (req, res) => {
     FROM sauces s
     INNER JOIN products_sauces ps ON s.id = ps.sauce_id
     INNER JOIN products p ON ps.product_id = p.id
-    WHERE p.branch_id = ?
+    WHERE p.branch_id = ? OR (p.branch_id = ? AND ? != ?)
   `;
-  let queryParams = [branchId];
+  let queryParams = [branchId, firstBranchId, branchIdNum, firstBranchId];
   
   // Поиск по названию
   if (search) {
