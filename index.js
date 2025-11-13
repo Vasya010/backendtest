@@ -761,14 +761,16 @@ app.get('/api/public/branches', (req, res) => {
 app.get('/api/public/branches/:branchId/products', (req, res) => {
   const { branchId } = req.params;
   const branchIdNum = parseInt(branchId);
-  // Если запрашивается не первый филиал, показываем товары из первого филиала тоже
-  const firstBranchId = 1;
+  // Первый филиал с товарами имеет id = 7, второй филиал id = 8
+  // Если запрашивается второй филиал (8), показываем товары из первого филиала (7) тоже
+  const firstBranchId = 7;
+  const secondBranchId = 8;
   
-  // Формируем условие: если запрашивается не первый филиал, добавляем товары первого филиала
+  // Формируем условие: если запрашивается второй филиал, добавляем товары первого филиала
   let whereCondition = 'p.branch_id = ?';
   let queryParams = [branchId];
   
-  if (branchIdNum !== firstBranchId) {
+  if (branchIdNum === secondBranchId) {
     whereCondition = '(p.branch_id = ? OR p.branch_id = ?)';
     queryParams = [branchId, firstBranchId];
   }
@@ -1007,7 +1009,9 @@ app.get('/api/public/branches/:branchId/sauces', (req, res) => {
   }
   
   const branchIdNum = parseInt(branchId);
-  const firstBranchId = 1;
+  // Первый филиал с товарами имеет id = 7, второй филиал id = 8
+  const firstBranchId = 7;
+  const secondBranchId = 8;
   
   // Валидация параметров сортировки
   const validSortFields = ['name', 'price', 'usage_count'];
@@ -1015,11 +1019,11 @@ app.get('/api/public/branches/:branchId/sauces', (req, res) => {
   const sortField = validSortFields.includes(sort) ? sort : 'name';
   const sortOrder = validOrders.includes(order.toUpperCase()) ? order.toUpperCase() : 'ASC';
   
-  // Формируем условие: если запрашивается не первый филиал, добавляем соусы из товаров первого филиала
+  // Формируем условие: если запрашивается второй филиал, добавляем соусы из товаров первого филиала
   let whereCondition = 'p.branch_id = ?';
   let queryParams = [branchId];
   
-  if (branchIdNum !== firstBranchId) {
+  if (branchIdNum === secondBranchId) {
     whereCondition = '(p.branch_id = ? OR p.branch_id = ?)';
     queryParams = [branchId, firstBranchId];
   }
