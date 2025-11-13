@@ -763,6 +763,16 @@ app.get('/api/public/branches/:branchId/products', (req, res) => {
   const branchIdNum = parseInt(branchId);
   // Если запрашивается не первый филиал, показываем товары из первого филиала тоже
   const firstBranchId = 1;
+  
+  // Формируем условие: если запрашивается не первый филиал, добавляем товары первого филиала
+  let whereCondition = 'p.branch_id = ?';
+  let queryParams = [branchId];
+  
+  if (branchIdNum !== firstBranchId) {
+    whereCondition = '(p.branch_id = ? OR p.branch_id = ?)';
+    queryParams = [branchId, firstBranchId];
+  }
+  
   db.query(`
     SELECT p.id, p.name, p.description, p.price_small, p.price_medium, p.price_large,
            p.price_single AS price, p.image AS image_url, c.name AS category,
@@ -784,9 +794,9 @@ app.get('/api/public/branches/:branchId/products', (req, res) => {
     FROM products p
     LEFT JOIN categories c ON p.category_id = c.id
     LEFT JOIN discounts d ON p.id = d.product_id AND d.is_active = TRUE AND (d.expires_at IS NULL OR d.expires_at > NOW())
-    WHERE p.branch_id = ? OR (p.branch_id = ? AND ? != ?)
+    WHERE ${whereCondition}
     GROUP BY p.id
-  `, [branchId, firstBranchId, branchIdNum, firstBranchId], (err, products) => {
+  `, queryParams, (err, products) => {
     if (err) {
       console.error('Ошибка получения продуктов:', err);
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
@@ -1005,15 +1015,23 @@ app.get('/api/public/branches/:branchId/sauces', (req, res) => {
   const sortField = validSortFields.includes(sort) ? sort : 'name';
   const sortOrder = validOrders.includes(order.toUpperCase()) ? order.toUpperCase() : 'ASC';
   
+  // Формируем условие: если запрашивается не первый филиал, добавляем соусы из товаров первого филиала
+  let whereCondition = 'p.branch_id = ?';
+  let queryParams = [branchId];
+  
+  if (branchIdNum !== firstBranchId) {
+    whereCondition = '(p.branch_id = ? OR p.branch_id = ?)';
+    queryParams = [branchId, firstBranchId];
+  }
+  
   let query = `
     SELECT DISTINCT s.id, s.name, s.price, s.image, s.created_at,
            COUNT(DISTINCT ps.product_id) as usage_count
     FROM sauces s
     INNER JOIN products_sauces ps ON s.id = ps.sauce_id
     INNER JOIN products p ON ps.product_id = p.id
-    WHERE p.branch_id = ? OR (p.branch_id = ? AND ? != ?)
+    WHERE ${whereCondition}
   `;
-  let queryParams = [branchId, firstBranchId, branchIdNum, firstBranchId];
   
   // Поиск по названию
   if (search) {
