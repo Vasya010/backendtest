@@ -213,7 +213,7 @@ function initializeServer(callback) {
                 } else {
                   const updateQueries = [
                     ['american_pizza.osh', '-1003140309410'],
-                    ['Араванский', '-1002311447135'],
+                    ['Шейт-добо филиал', '-5076214229'],
                     ['Ошский район', '-1002638475628'],
                   ];
                   let updated = 0;
