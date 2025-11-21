@@ -143,3 +143,6 @@ app.listen(PORT, () => {
   console.log('⚠️  ВАЖНО: Адаптируйте функцию sendSMSCommand() под ваш способ отправки SMS!\n');
 });
 
+
+
+

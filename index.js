@@ -1667,6 +1667,49 @@ app.get('/api/public/auth/profile', optionalAuthenticateToken, (req, res) => {
   });
 });
 
+app.delete('/api/public/auth/account', authenticateToken, (req, res) => {
+  const userId = req.user.id;
+
+  db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+
+    const phone = users[0].phone;
+    const cleanupQueries = [
+      { sql: 'DELETE FROM cashback_transactions WHERE phone = ?', params: [phone] },
+      { sql: 'DELETE FROM cashback_balance WHERE phone = ?', params: [phone] },
+      { sql: 'DELETE FROM uds_transactions WHERE phone = ?', params: [phone] },
+      { sql: 'DELETE FROM uds_balance WHERE phone = ?', params: [phone] },
+      { sql: 'DELETE FROM user_qr_codes WHERE user_id = ?', params: [userId] },
+      { sql: 'DELETE FROM notifications WHERE user_id = ?', params: [userId] },
+    ];
+
+    const runCleanup = (index) => {
+      if (index >= cleanupQueries.length) {
+        return deleteUser();
+      }
+
+      const { sql, params } = cleanupQueries[index];
+      db.query(sql, params, (cleanupErr) => {
+        if (cleanupErr) {
+          return res.status(500).json({ error: `Ошибка сервера: ${cleanupErr.message}` });
+        }
+        runCleanup(index + 1);
+      });
+    };
+
+    const deleteUser = () => {
+      db.query('DELETE FROM app_users WHERE id = ?', [userId], (deleteErr, result) => {
+        if (deleteErr) return res.status(500).json({ error: `Ошибка сервера: ${deleteErr.message}` });
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+        res.json({ success: true });
+      });
+    };
+
+    runCleanup(0);
+  });
+});
+
 // API для получения кешбэка по токену (для авторизованных пользователей)
 app.get('/api/public/cashback/balance', optionalAuthenticateToken, (req, res) => {
   const userId = req.user?.id;
