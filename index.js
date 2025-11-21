@@ -23,7 +23,7 @@ const MYSQL_USER = process.env.MYSQL_USER || 'cz45780_pizzaame';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'Vasya11091109';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'cz45780_pizzaame';
 // Локальный SMS Gateway (на вашем сервере)
-const SMS_GATEWAY_URL = process.env.SMS_GATEWAY_URL || 'https://vasya010-backendtest-260b.twc1.net/sms/send';
+const SMS_GATEWAY_URL = process.env.SMS_GATEWAY_URL || 'https://vasya010-red-bdf5.twc1.net/sms/send';
 const SMS_GATEWAY_API_KEY = process.env.SMS_GATEWAY_API_KEY || '';
 const SMS_GATEWAY_METHOD = process.env.SMS_GATEWAY_METHOD || 'POST'; 
 
@@ -213,7 +213,7 @@ function initializeServer(callback) {
                 } else {
                   const updateQueries = [
                     ['american_pizza.osh', '-1003140309410'],
-                    ['Араванский', '-1002311447135'],
+                    ['Шейт-добо филиал', '-5076214229'],
                     ['Ошский район', '-1002638475628'],
                   ];
                   let updated = 0;
@@ -760,6 +760,21 @@ app.get('/api/public/branches', (req, res) => {
 
 app.get('/api/public/branches/:branchId/products', (req, res) => {
   const { branchId } = req.params;
+  const branchIdNum = parseInt(branchId);
+  // Первый филиал с товарами имеет id = 7, второй филиал id = 8
+  // Если запрашивается второй филиал (8), показываем товары из первого филиала (7) тоже
+  const firstBranchId = 7;
+  const secondBranchId = 8;
+  
+  // Формируем условие: если запрашивается второй филиал, добавляем товары первого филиала
+  let whereCondition = 'p.branch_id = ?';
+  let queryParams = [branchId];
+  
+  if (branchIdNum === secondBranchId) {
+    whereCondition = '(p.branch_id = ? OR p.branch_id = ?)';
+    queryParams = [branchId, firstBranchId];
+  }
+  
   db.query(`
     SELECT p.id, p.name, p.description, p.price_small, p.price_medium, p.price_large,
            p.price_single AS price, p.image AS image_url, c.name AS category,
@@ -781,9 +796,9 @@ app.get('/api/public/branches/:branchId/products', (req, res) => {
     FROM products p
     LEFT JOIN categories c ON p.category_id = c.id
     LEFT JOIN discounts d ON p.id = d.product_id AND d.is_active = TRUE AND (d.expires_at IS NULL OR d.expires_at > NOW())
-    WHERE p.branch_id = ?
+    WHERE ${whereCondition}
     GROUP BY p.id
-  `, [branchId], (err, products) => {
+  `, queryParams, (err, products) => {
     if (err) {
       console.error('Ошибка получения продуктов:', err);
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
@@ -993,11 +1008,25 @@ app.get('/api/public/branches/:branchId/sauces', (req, res) => {
     return res.status(400).json({ error: 'Некорректный ID филиала' });
   }
   
+  const branchIdNum = parseInt(branchId);
+  // Первый филиал с товарами имеет id = 7, второй филиал id = 8
+  const firstBranchId = 7;
+  const secondBranchId = 8;
+  
   // Валидация параметров сортировки
   const validSortFields = ['name', 'price', 'usage_count'];
   const validOrders = ['ASC', 'DESC'];
   const sortField = validSortFields.includes(sort) ? sort : 'name';
   const sortOrder = validOrders.includes(order.toUpperCase()) ? order.toUpperCase() : 'ASC';
+  
+  // Формируем условие: если запрашивается второй филиал, добавляем соусы из товаров первого филиала
+  let whereCondition = 'p.branch_id = ?';
+  let queryParams = [branchId];
+  
+  if (branchIdNum === secondBranchId) {
+    whereCondition = '(p.branch_id = ? OR p.branch_id = ?)';
+    queryParams = [branchId, firstBranchId];
+  }
   
   let query = `
     SELECT DISTINCT s.id, s.name, s.price, s.image, s.created_at,
@@ -1005,9 +1034,8 @@ app.get('/api/public/branches/:branchId/sauces', (req, res) => {
     FROM sauces s
     INNER JOIN products_sauces ps ON s.id = ps.sauce_id
     INNER JOIN products p ON ps.product_id = p.id
-    WHERE p.branch_id = ?
+    WHERE ${whereCondition}
   `;
-  let queryParams = [branchId];
   
   // Поиск по названию
   if (search) {
@@ -1111,7 +1139,7 @@ app.get('/api/public/stories', (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const storiesWithUrls = stories.map(story => ({
       ...story,
-      image: `https://vasya010-backendtest-260b.twc1.net/product-image/${story.image.split('/').pop()}`
+      image: `https://vasya010-red-bdf5.twc1.net/product-image/${story.image.split('/').pop()}`
     }));
     res.json(storiesWithUrls);
   });
@@ -1128,7 +1156,7 @@ app.get('/api/public/banners', (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const bannersWithUrls = banners.map(banner => ({
       ...banner,
-      image: `https://vasya010-backendtest-260b.twc1.net/product-image/${banner.image.split('/').pop()}`
+      image: `https://vasya010-red-bdf5.twc1.net/product-image/${banner.image.split('/').pop()}`
     }));
     res.json(bannersWithUrls);
   });
@@ -3035,7 +3063,7 @@ app.get('/news', authenticateToken, (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const newsWithUrls = news.map(item => ({
       ...item,
-      image: item.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${item.image.split('/').pop()}` : null
+      image: item.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${item.image.split('/').pop()}` : null
     }));
     res.json(newsWithUrls);
   });
@@ -3060,7 +3088,7 @@ app.post('/news', authenticateToken, (req, res) => {
             const newsItem = rows[0];
             res.status(201).json({
               ...newsItem,
-              image: newsItem.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
+              image: newsItem.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
             });
           });
         }
@@ -3114,7 +3142,7 @@ app.put('/news/:id', authenticateToken, (req, res) => {
               const newsItem = rows[0];
               res.json({
                 ...newsItem,
-                image: newsItem.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
+                image: newsItem.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${newsItem.image.split('/').pop()}` : null
               });
             });
           }
@@ -3156,7 +3184,7 @@ function sendPromotionNotifications(promotion, callback) {
       return callback(null, { sent: 0, total: 0 });
     }
 
-    const imageUrl = promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null;
+    const imageUrl = promotion.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${promotion.image.split('/').pop()}` : null;
     const promoText = promotion.promo_code ? ` Промокод: ${promotion.promo_code} (${promotion.discount_percent}%)` : '';
     
     users.forEach((user, index) => {
@@ -3200,7 +3228,7 @@ app.get('/promotions', authenticateToken, (req, res) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     const promotionsWithUrls = promotions.map(item => ({
       ...item,
-      image: item.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${item.image.split('/').pop()}` : null
+      image: item.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${item.image.split('/').pop()}` : null
     }));
     res.json(promotionsWithUrls);
   });
@@ -3231,7 +3259,7 @@ app.post('/promotions', authenticateToken, (req, res) => {
             const promotion = rows[0];
             const promotionWithUrl = {
               ...promotion,
-              image: promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
+              image: promotion.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
             };
 
             // Отправка уведомлений, если требуется
@@ -3303,7 +3331,7 @@ app.put('/promotions/:id', authenticateToken, (req, res) => {
               const promotion = rows[0];
               res.json({
                 ...promotion,
-                image: promotion.image ? `https://vasya010-backendtest-260b.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
+                image: promotion.image ? `https://vasya010-red-bdf5.twc1.net/product-image/${promotion.image.split('/').pop()}` : null
               });
             });
           }
