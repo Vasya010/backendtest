@@ -493,8 +493,24 @@ function initializeServer(callback) {
                     connection.release();
                     return callback(err);
                   }
-                  // Проверяем наличие поля last_qr_cashback_date
-                  connection.query('SHOW COLUMNS FROM app_users LIKE "last_qr_cashback_date"', (err, cashbackColumns) => {
+                });
+              }
+              // Проверяем наличие поля user_code
+              connection.query('SHOW COLUMNS FROM app_users LIKE "user_code"', (err, userCodeColumns) => {
+                if (err) {
+                  connection.release();
+                  return callback(err);
+                }
+                if (userCodeColumns.length === 0) {
+                  connection.query('ALTER TABLE app_users ADD COLUMN user_code VARCHAR(6)', (err) => {
+                    if (err) {
+                      connection.release();
+                      return callback(err);
+                    }
+                  });
+                }
+                // Проверяем наличие поля last_qr_cashback_date
+                connection.query('SHOW COLUMNS FROM app_users LIKE "last_qr_cashback_date"', (err, cashbackColumns) => {
                     if (err) {
                       connection.release();
                       return callback(err);
@@ -511,23 +527,38 @@ function initializeServer(callback) {
                   });
                 });
               } else {
-                // Проверяем наличие поля last_qr_cashback_date
-                connection.query('SHOW COLUMNS FROM app_users LIKE "last_qr_cashback_date"', (err, cashbackColumns) => {
+                // Проверяем наличие поля user_code
+                connection.query('SHOW COLUMNS FROM app_users LIKE "user_code"', (err, userCodeColumns) => {
                   if (err) {
                     connection.release();
                     return callback(err);
                   }
-                  if (cashbackColumns.length === 0) {
-                    connection.query('ALTER TABLE app_users ADD COLUMN last_qr_cashback_date DATE', (err) => {
+                  if (userCodeColumns.length === 0) {
+                    connection.query('ALTER TABLE app_users ADD COLUMN user_code VARCHAR(6)', (err) => {
                       if (err) {
                         connection.release();
                         return callback(err);
                       }
-                      createStoriesTable();
                     });
-                  } else {
-                    createStoriesTable();
                   }
+                  // Проверяем наличие поля last_qr_cashback_date
+                  connection.query('SHOW COLUMNS FROM app_users LIKE "last_qr_cashback_date"', (err, cashbackColumns) => {
+                    if (err) {
+                      connection.release();
+                      return callback(err);
+                    }
+                    if (cashbackColumns.length === 0) {
+                      connection.query('ALTER TABLE app_users ADD COLUMN last_qr_cashback_date DATE', (err) => {
+                        if (err) {
+                          connection.release();
+                          return callback(err);
+                        }
+                        createStoriesTable();
+                      });
+                    } else {
+                      createStoriesTable();
+                    }
+                  });
                 });
               }
             });
@@ -1401,6 +1432,42 @@ function generateSMSCode() {
   return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
+// Генерация 6-значного кода для пользователя
+function generateUserCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// Linko API credentials
+const LINKO_API_LOGIN = 'API Сайт';
+const LINKO_API_KEY = '882f446d5f6449d79667eb9eeb1c36ec';
+const LINKO_API_URL = 'https://api.linko.ru/api/v1';
+
+// Функция для работы с Linko API (скидки)
+async function applyLinkoDiscount(userCode, orderAmount) {
+  try {
+    const response = await axios.post(
+      `${LINKO_API_URL}/discounts/apply`,
+      {
+        user_code: userCode,
+        amount: orderAmount,
+      },
+      {
+        auth: {
+          username: LINKO_API_LOGIN,
+          password: LINKO_API_KEY,
+        },
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    return response.data;
+  } catch (error) {
+    console.error('Linko API error:', error.message);
+    return null;
+  }
+}
+
 // Функция отправки SMS через локальный SMS Gateway на сервере
 async function sendSMS(phone, code) {
   try {
@@ -1544,25 +1611,85 @@ app.post('/api/public/auth/verify-code', (req, res) => {
     
     if (users.length === 0) {
       // Регистрация нового пользователя
-      db.query('INSERT INTO app_users (phone) VALUES (?)', [cleanPhone], (err, result) => {
+      const userCode = generateUserCode();
+      db.query('INSERT INTO app_users (phone, user_code) VALUES (?, ?)', [cleanPhone, userCode], (err, result) => {
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         
         const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
         res.json({ 
           token, 
-          user: { id: result.insertId, phone: cleanPhone, name: null },
+          user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
           isNewUser: true
         });
       });
     } else {
       // Вход существующего пользователя
       const user = users[0];
+      // Если у пользователя нет кода, генерируем его
+      if (!user.user_code) {
+        const userCode = generateUserCode();
+        db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, user.id], (err) => {
+          if (err) console.error('Error updating user_code:', err);
+        });
+        user.user_code = userCode;
+      }
       const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
       res.json({ 
         token, 
-        user: { id: user.id, phone: user.phone, name: user.name },
+        user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
         isNewUser: false
       });
+    }
+  });
+});
+
+// API для получения user_code пользователя
+app.get('/api/public/user-code', authenticateToken, (req, res) => {
+  const userId = req.user.id;
+  db.query('SELECT user_code FROM app_users WHERE id = ?', [userId], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    let userCode = users[0].user_code;
+    // Если у пользователя нет кода, генерируем его
+    if (!userCode) {
+      userCode = generateUserCode();
+      db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, userId], (err) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      });
+    }
+    
+    res.json({ user_code: userCode });
+  });
+});
+
+// API для применения скидки через Linko
+app.post('/api/public/linko/apply-discount', authenticateToken, async (req, res) => {
+  const { orderAmount } = req.body;
+  const userId = req.user.id;
+  
+  if (!orderAmount || orderAmount <= 0) {
+    return res.status(400).json({ error: 'Неверная сумма заказа' });
+  }
+  
+  db.query('SELECT user_code FROM app_users WHERE id = ?', [userId], async (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    const userCode = users[0].user_code;
+    if (!userCode) {
+      return res.status(400).json({ error: 'У пользователя нет кода' });
+    }
+    
+    try {
+      const discountResult = await applyLinkoDiscount(userCode, orderAmount);
+      if (discountResult) {
+        res.json({ success: true, discount: discountResult });
+      } else {
+        res.status(500).json({ error: 'Не удалось применить скидку через Linko' });
+      }
+    } catch (error) {
+      res.status(500).json({ error: `Ошибка Linko API: ${error.message}` });
     }
   });
 });
@@ -1584,23 +1711,32 @@ app.post('/api/public/auth/phone', (req, res) => {
     
     if (users.length === 0) {
       // Регистрация нового пользователя
-      db.query('INSERT INTO app_users (phone) VALUES (?)', [cleanPhone], (err, result) => {
+      const userCode = generateUserCode();
+      db.query('INSERT INTO app_users (phone, user_code) VALUES (?, ?)', [cleanPhone, userCode], (err, result) => {
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         
         const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
         res.json({ 
           token, 
-          user: { id: result.insertId, phone: cleanPhone, name: null },
+          user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
           isNewUser: true
         });
       });
     } else {
       // Вход существующего пользователя
       const user = users[0];
+      // Если у пользователя нет кода, генерируем его
+      if (!user.user_code) {
+        const userCode = generateUserCode();
+        db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, user.id], (err) => {
+          if (err) console.error('Error updating user_code:', err);
+        });
+        user.user_code = userCode;
+      }
       const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
       res.json({ 
         token, 
-        user: { id: user.id, phone: user.phone, name: user.name },
+        user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
         isNewUser: false
       });
     }
