@@ -1630,7 +1630,7 @@ app.get('/api/public/user-code', authenticateToken, (req, res) => {
   });
 });
 
-// API для применения скидки через Linko
+// API для применения скидки через Linko (для заказов)
 app.post('/api/public/linko/apply-discount', authenticateToken, async (req, res) => {
   const { orderAmount } = req.body;
   const userId = req.user.id;
@@ -1658,6 +1658,83 @@ app.post('/api/public/linko/apply-discount', authenticateToken, async (req, res)
     } catch (error) {
       res.status(500).json({ error: `Ошибка Linko API: ${error.message}` });
     }
+  });
+});
+
+// API для админа: начисление кешбэка по 6-значному коду пользователя
+app.post('/api/admin/cashback/add-by-code', (req, res) => {
+  const { user_code, amount, description } = req.body;
+  
+  if (!user_code || !amount) {
+    return res.status(400).json({ error: 'Код пользователя и сумма обязательны' });
+  }
+  
+  if (amount <= 0) {
+    return res.status(400).json({ error: 'Сумма должна быть больше нуля' });
+  }
+  
+  // Проверяем, что код состоит из 6 цифр
+  if (!/^\d{6}$/.test(user_code)) {
+    return res.status(400).json({ error: 'Код должен состоять из 6 цифр' });
+  }
+  
+  // Находим пользователя по коду
+  db.query('SELECT id, phone FROM app_users WHERE user_code = ?', [user_code], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Пользователь с таким кодом не найден' });
+    }
+    
+    const user = users[0];
+    const phone = user.phone;
+    
+    // Начисляем кешбэк
+    db.query(
+      `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+       VALUES (?, ?, ?, 0, 'bronze')
+       ON DUPLICATE KEY UPDATE
+       balance = balance + ?,
+       total_earned = total_earned + ?`,
+      [phone, amount, amount, amount, amount],
+      (err, result) => {
+        if (err) return res.status(500).json({ error: `Ошибка начисления кешбэка: ${err.message}` });
+        
+        // Записываем транзакцию
+        const transactionDescription = description || `Начисление кешбэка по коду ${user_code}`;
+        db.query(
+          'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+          [phone, amount, transactionDescription],
+          (err) => {
+            if (err) {
+              console.error('Ошибка записи транзакции:', err);
+            }
+            
+            // Получаем актуальный баланс
+            db.query(
+              'SELECT balance, total_earned FROM cashback_balance WHERE phone = ?',
+              [phone],
+              (err, balanceResult) => {
+                if (err) {
+                  console.error('Ошибка получения баланса:', err);
+                }
+                
+                res.json({
+                  success: true,
+                  message: `Кешбэк успешно начислен пользователю`,
+                  user: {
+                    phone: phone,
+                    user_code: user_code,
+                  },
+                  amount: amount,
+                  balance: balanceResult.length > 0 ? parseFloat(balanceResult[0].balance) : amount,
+                  total_earned: balanceResult.length > 0 ? parseFloat(balanceResult[0].total_earned) : amount
+                });
+              }
+            );
+          }
+        );
+      }
+    );
   });
 });
 
