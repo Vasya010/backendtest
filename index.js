@@ -517,38 +517,6 @@ function initializeServer(callback) {
                     }
                     if (cashbackColumns.length === 0) {
                       connection.query('ALTER TABLE app_users ADD COLUMN last_qr_cashback_date DATE', (err) => {
-                        connection.release();
-                        return callback(err);
-                      });
-                    } else {
-                      connection.release();
-                      return callback(null);
-                    }
-                  });
-                });
-              } else {
-                // Проверяем наличие поля user_code
-                connection.query('SHOW COLUMNS FROM app_users LIKE "user_code"', (err, userCodeColumns) => {
-                  if (err) {
-                    connection.release();
-                    return callback(err);
-                  }
-                  if (userCodeColumns.length === 0) {
-                    connection.query('ALTER TABLE app_users ADD COLUMN user_code VARCHAR(6)', (err) => {
-                      if (err) {
-                        connection.release();
-                        return callback(err);
-                      }
-                    });
-                  }
-                  // Проверяем наличие поля last_qr_cashback_date
-                  connection.query('SHOW COLUMNS FROM app_users LIKE "last_qr_cashback_date"', (err, cashbackColumns) => {
-                    if (err) {
-                      connection.release();
-                      return callback(err);
-                    }
-                    if (cashbackColumns.length === 0) {
-                      connection.query('ALTER TABLE app_users ADD COLUMN last_qr_cashback_date DATE', (err) => {
                         if (err) {
                           connection.release();
                           return callback(err);
@@ -560,7 +528,6 @@ function initializeServer(callback) {
                     }
                   });
                 });
-              }
             });
           });
         }
