@@ -22,7 +22,7 @@ const MYSQL_HOST = process.env.MYSQL_HOST || 'vh446.timeweb.ru';
 const MYSQL_USER = process.env.MYSQL_USER || 'cz45780_pizzaame';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'Vasya11091109';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'cz45780_pizzaame';
-// Локальный SMS Gateway (на вашем сервере)
+// Локальный SMS Gateway (на вашем сервере)22
 const SMS_GATEWAY_URL = process.env.SMS_GATEWAY_URL || 'https://vasya010-red-bdf5.twc1.net/sms/send';
 const SMS_GATEWAY_API_KEY = process.env.SMS_GATEWAY_API_KEY || '';
 const SMS_GATEWAY_METHOD = process.env.SMS_GATEWAY_METHOD || 'POST'; 
