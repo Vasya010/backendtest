@@ -1661,8 +1661,48 @@ app.post('/api/public/linko/apply-discount', authenticateToken, async (req, res)
   });
 });
 
+// API для админа: получение информации о пользователе по коду
+app.get('/api/admin/user-by-code/:code', authenticateToken, (req, res) => {
+  const { code } = req.params;
+  
+  if (!code || !/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: 'Код должен состоять из 6 цифр' });
+  }
+  
+  // Находим пользователя по коду
+  db.query('SELECT id, phone, name, user_code FROM app_users WHERE user_code = ?', [code], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Пользователь с таким кодом не найден' });
+    }
+    
+    const user = users[0];
+    const phone = user.phone;
+    
+    // Получаем баланс кешбэка
+    db.query(
+      'SELECT balance, total_earned FROM cashback_balance WHERE phone = ?',
+      [phone],
+      (err, balanceResult) => {
+        if (err) {
+          console.error('Ошибка получения баланса:', err);
+        }
+        
+        res.json({
+          id: user.id,
+          phone: user.phone,
+          name: user.name,
+          user_code: user.user_code,
+          balance: balanceResult.length > 0 ? parseFloat(balanceResult[0].balance || 0) : 0,
+          total_earned: balanceResult.length > 0 ? parseFloat(balanceResult[0].total_earned || 0) : 0
+        });
+      }
+    );
+  });
+});
+
 // API для админа: начисление кешбэка по 6-значному коду пользователя
-app.post('/api/admin/cashback/add-by-code', (req, res) => {
+app.post('/api/admin/cashback/add-by-code', authenticateToken, (req, res) => {
   const { user_code, amount, description } = req.body;
   
   if (!user_code || !amount) {
@@ -1718,6 +1758,7 @@ app.post('/api/admin/cashback/add-by-code', (req, res) => {
                   console.error('Ошибка получения баланса:', err);
                 }
                 
+                const newBalance = balanceResult.length > 0 ? parseFloat(balanceResult[0].balance) : amount;
                 res.json({
                   success: true,
                   message: `Кешбэк успешно начислен пользователю`,
@@ -1726,7 +1767,8 @@ app.post('/api/admin/cashback/add-by-code', (req, res) => {
                     user_code: user_code,
                   },
                   amount: amount,
-                  balance: balanceResult.length > 0 ? parseFloat(balanceResult[0].balance) : amount,
+                  new_balance: newBalance.toFixed(2),
+                  balance: newBalance,
                   total_earned: balanceResult.length > 0 ? parseFloat(balanceResult[0].total_earned) : amount
                 });
               }
