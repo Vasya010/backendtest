@@ -750,24 +750,7 @@ function initializeServer(callback) {
 }
 
 app.get('/api/public/branches', (req, res) => {
-  const { country, city } = req.query;
-  
-  let query = 'SELECT id, name, address, country, city FROM branches WHERE 1=1';
-  const params = [];
-  
-  if (country) {
-    query += ' AND country = ?';
-    params.push(country);
-  }
-  
-  if (city) {
-    query += ' AND city = ?';
-    params.push(city);
-  }
-  
-  query += ' ORDER BY name';
-  
-  db.query(query, params, (err, branches) => {
+  db.query('SELECT id, name, address FROM branches', (err, branches) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     res.json(branches);
   });
