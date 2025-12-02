@@ -1780,6 +1780,98 @@ app.post('/api/admin/cashback/add-by-code', authenticateToken, (req, res) => {
   });
 });
 
+// API для админа: списание кешбэка по 6-значному коду пользователя
+app.post('/api/admin/cashback/subtract-by-code', authenticateToken, (req, res) => {
+  const { user_code, amount, description } = req.body;
+  
+  if (!user_code || !amount) {
+    return res.status(400).json({ error: 'Код пользователя и сумма обязательны' });
+  }
+  
+  if (amount <= 0) {
+    return res.status(400).json({ error: 'Сумма должна быть больше нуля' });
+  }
+  
+  // Проверяем, что код состоит из 6 цифр
+  if (!/^\d{6}$/.test(user_code)) {
+    return res.status(400).json({ error: 'Код должен состоять из 6 цифр' });
+  }
+  
+  // Находим пользователя по коду
+  db.query('SELECT id, phone FROM app_users WHERE user_code = ?', [user_code], (err, users) => {
+    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Пользователь с таким кодом не найден' });
+    }
+    
+    const user = users[0];
+    const phone = user.phone;
+    
+    // Проверяем текущий баланс
+    db.query('SELECT balance FROM cashback_balance WHERE phone = ?', [phone], (err, balanceResult) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      const currentBalance = balanceResult.length > 0 ? parseFloat(balanceResult[0].balance || 0) : 0;
+      
+      if (currentBalance < amount) {
+        return res.status(400).json({ 
+          error: `Недостаточно средств. Текущий баланс: ${currentBalance.toFixed(2)} сом, требуется: ${amount.toFixed(2)} сом` 
+        });
+      }
+      
+      // Списываем кешбэк
+      db.query(
+        'UPDATE cashback_balance SET balance = balance - ?, total_spent = COALESCE(total_spent, 0) + ? WHERE phone = ?',
+        [amount, amount, phone],
+        (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка списания кешбэка: ${err.message}` });
+          
+          if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Баланс не найден' });
+          }
+          
+          // Записываем транзакцию
+          const transactionDescription = description || `Списание кешбэка по коду ${user_code}`;
+          db.query(
+            'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "spent", ?, ?)',
+            [phone, amount, transactionDescription],
+            (err) => {
+              if (err) {
+                console.error('Ошибка записи транзакции:', err);
+              }
+              
+              // Получаем актуальный баланс
+              db.query(
+                'SELECT balance, total_earned, total_spent FROM cashback_balance WHERE phone = ?',
+                [phone],
+                (err, balanceResult) => {
+                  if (err) {
+                    console.error('Ошибка получения баланса:', err);
+                  }
+                  
+                  const newBalance = balanceResult.length > 0 ? parseFloat(balanceResult[0].balance) : 0;
+                  res.json({
+                    success: true,
+                    message: `Кешбэк успешно списан`,
+                    user: {
+                      phone: phone,
+                      user_code: user_code,
+                    },
+                    amount: amount,
+                    new_balance: newBalance.toFixed(2),
+                    balance: newBalance,
+                    total_spent: balanceResult.length > 0 ? parseFloat(balanceResult[0].total_spent || 0) : amount
+                  });
+                }
+              );
+            }
+          );
+        }
+      );
+    });
+  });
+});
+
 // API для входа/регистрации по телефону (старый метод, оставляем для совместимости)
 app.post('/api/public/auth/phone', (req, res) => {
   const { phone } = req.body;
