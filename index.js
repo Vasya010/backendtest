@@ -1214,7 +1214,7 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
     const cashbackUsedAmount = userId ? (Number(cashbackUsed) || 0) : 0; // Кешбэк только для авторизованных
     
     // Кешбэк начисляется только для авторизованных пользователей
-    const cashbackEarned = userId ? Math.round(discountedTotal * 0.03) : 0; // 3% кешбэк
+    const cashbackEarned = userId ? Math.round(discountedTotal * 0.07) : 0; // 7% кешбэк
     const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount);
     
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
