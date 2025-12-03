@@ -521,10 +521,44 @@ function initializeServer(callback) {
                           connection.release();
                           return callback(err);
                         }
-                        createStoriesTable();
+                        // Проверяем наличие поля referrer_id
+                        connection.query('SHOW COLUMNS FROM app_users LIKE "referrer_id"', (err, referrerColumns) => {
+                          if (err) {
+                            connection.release();
+                            return callback(err);
+                          }
+                          if (referrerColumns.length === 0) {
+                            connection.query('ALTER TABLE app_users ADD COLUMN referrer_id INT NULL, ADD INDEX idx_referrer_id (referrer_id)', (err) => {
+                              if (err) {
+                                connection.release();
+                                return callback(err);
+                              }
+                              createStoriesTable();
+                            });
+                          } else {
+                            createStoriesTable();
+                          }
+                        });
                       });
                     } else {
-                      createStoriesTable();
+                      // Проверяем наличие поля referrer_id
+                      connection.query('SHOW COLUMNS FROM app_users LIKE "referrer_id"', (err, referrerColumns) => {
+                        if (err) {
+                          connection.release();
+                          return callback(err);
+                        }
+                        if (referrerColumns.length === 0) {
+                          connection.query('ALTER TABLE app_users ADD COLUMN referrer_id INT NULL, ADD INDEX idx_referrer_id (referrer_id)', (err) => {
+                            if (err) {
+                              connection.release();
+                              return callback(err);
+                            }
+                            createStoriesTable();
+                          });
+                        } else {
+                          createStoriesTable();
+                        }
+                      });
                     }
                   });
                 });
@@ -750,7 +784,19 @@ function initializeServer(callback) {
 }
 
 app.get('/api/public/branches', (req, res) => {
-  db.query('SELECT id, name, address FROM branches', (err, branches) => {
+  const { country } = req.query;
+  
+  let query = 'SELECT id, name, address FROM branches';
+  const params = [];
+  
+  if (country) {
+    query += ' WHERE country = ?';
+    params.push(country);
+  }
+  
+  query += ' ORDER BY name';
+  
+  db.query(query, params, (err, branches) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     res.json(branches);
   });
@@ -1543,7 +1589,7 @@ app.post('/api/public/auth/send-code', async (req, res) => {
 
 // API для проверки SMS кода и входа/регистрации
 app.post('/api/public/auth/verify-code', (req, res) => {
-  const { phone, code } = req.body;
+  const { phone, code, referral_code } = req.body;
   if (!phone || !code) {
     return res.status(400).json({ error: 'Телефон и код обязательны' });
   }
@@ -1579,14 +1625,74 @@ app.post('/api/public/auth/verify-code', (req, res) => {
     if (users.length === 0) {
       // Регистрация нового пользователя
       const userCode = generateUserCode();
-      db.query('INSERT INTO app_users (phone, user_code) VALUES (?, ?)', [cleanPhone, userCode], (err, result) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      // Обрабатываем реферальный код
+      const processReferral = (callback) => {
+        if (!referral_code || !/^\d{6}$/.test(referral_code)) {
+          return callback(null);
+        }
         
-        const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ 
-          token, 
-          user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
-          isNewUser: true
+        // Находим реферера по коду
+        db.query('SELECT id, phone FROM app_users WHERE user_code = ?', [referral_code], (err, referrers) => {
+          if (err) {
+            console.error('Ошибка поиска реферера:', err);
+            return callback(null);
+          }
+          
+          if (referrers.length === 0) {
+            // Реферальный код не найден, но продолжаем регистрацию
+            return callback(null);
+          }
+          
+          const referrer = referrers[0];
+          const referrerId = referrer.id;
+          const referrerPhone = referrer.phone;
+          
+          // Начисляем бонус рефереру (например, 100 сом)
+          const referralBonus = 100;
+          db.query(
+            `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+             VALUES (?, ?, ?, 0, 'bronze')
+             ON DUPLICATE KEY UPDATE
+             balance = balance + ?,
+             total_earned = total_earned + ?`,
+            [referrerPhone, referralBonus, referralBonus, referralBonus, referralBonus],
+            (err) => {
+              if (err) {
+                console.error('Ошибка начисления бонуса рефереру:', err);
+              } else {
+                // Записываем транзакцию
+                db.query(
+                  'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                  [referrerPhone, referralBonus, `Бонус за приглашение пользователя`],
+                  () => {}
+                );
+                console.log(`Начислен бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение`);
+              }
+              callback(referrerId);
+            }
+          );
+        });
+      };
+      
+      processReferral((referrerId) => {
+        // Регистрируем нового пользователя
+        const insertQuery = referrerId 
+          ? 'INSERT INTO app_users (phone, user_code, referrer_id) VALUES (?, ?, ?)'
+          : 'INSERT INTO app_users (phone, user_code) VALUES (?, ?)';
+        const insertParams = referrerId 
+          ? [cleanPhone, userCode, referrerId]
+          : [cleanPhone, userCode];
+        
+        db.query(insertQuery, insertParams, (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          
+          const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+          res.json({ 
+            token, 
+            user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+            isNewUser: true
+          });
         });
       });
     } else {
@@ -1874,7 +1980,7 @@ app.post('/api/admin/cashback/subtract-by-code', authenticateToken, (req, res) =
 
 // API для входа/регистрации по телефону (старый метод, оставляем для совместимости)
 app.post('/api/public/auth/phone', (req, res) => {
-  const { phone } = req.body;
+  const { phone, referral_code } = req.body;
   if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
   
   // Очищаем телефон от лишних символов
@@ -1890,14 +1996,74 @@ app.post('/api/public/auth/phone', (req, res) => {
     if (users.length === 0) {
       // Регистрация нового пользователя
       const userCode = generateUserCode();
-      db.query('INSERT INTO app_users (phone, user_code) VALUES (?, ?)', [cleanPhone, userCode], (err, result) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      // Обрабатываем реферальный код
+      const processReferral = (callback) => {
+        if (!referral_code || !/^\d{6}$/.test(referral_code)) {
+          return callback(null);
+        }
         
-        const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ 
-          token, 
-          user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
-          isNewUser: true
+        // Находим реферера по коду
+        db.query('SELECT id, phone FROM app_users WHERE user_code = ?', [referral_code], (err, referrers) => {
+          if (err) {
+            console.error('Ошибка поиска реферера:', err);
+            return callback(null);
+          }
+          
+          if (referrers.length === 0) {
+            // Реферальный код не найден, но продолжаем регистрацию
+            return callback(null);
+          }
+          
+          const referrer = referrers[0];
+          const referrerId = referrer.id;
+          const referrerPhone = referrer.phone;
+          
+          // Начисляем бонус рефереру (например, 100 сом)
+          const referralBonus = 100;
+          db.query(
+            `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+             VALUES (?, ?, ?, 0, 'bronze')
+             ON DUPLICATE KEY UPDATE
+             balance = balance + ?,
+             total_earned = total_earned + ?`,
+            [referrerPhone, referralBonus, referralBonus, referralBonus, referralBonus],
+            (err) => {
+              if (err) {
+                console.error('Ошибка начисления бонуса рефереру:', err);
+              } else {
+                // Записываем транзакцию
+                db.query(
+                  'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                  [referrerPhone, referralBonus, `Бонус за приглашение пользователя`],
+                  () => {}
+                );
+                console.log(`Начислен бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение`);
+              }
+              callback(referrerId);
+            }
+          );
+        });
+      };
+      
+      processReferral((referrerId) => {
+        // Регистрируем нового пользователя
+        const insertQuery = referrerId 
+          ? 'INSERT INTO app_users (phone, user_code, referrer_id) VALUES (?, ?, ?)'
+          : 'INSERT INTO app_users (phone, user_code) VALUES (?, ?)';
+        const insertParams = referrerId 
+          ? [cleanPhone, userCode, referrerId]
+          : [cleanPhone, userCode];
+        
+        db.query(insertQuery, insertParams, (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          
+          const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+          res.json({ 
+            token, 
+            user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+            isNewUser: true
+          });
         });
       });
     } else {
