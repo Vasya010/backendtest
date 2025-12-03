@@ -462,6 +462,29 @@ function initializeServer(callback) {
               connection.release();
               return callback(err);
             }
+            createGiftTable();
+          });
+        }
+        function createGiftTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS gift_opened (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              user_id INT NOT NULL,
+              opened_date DATE NOT NULL,
+              prize_type VARCHAR(50) NOT NULL,
+              prize_description TEXT,
+              amount DECIMAL(10,2),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE KEY unique_user_date (user_id, opened_date),
+              INDEX idx_user_id (user_id),
+              INDEX idx_opened_date (opened_date),
+              FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
             createUsersTable();
           });
         }
@@ -2364,6 +2387,104 @@ app.get('/api/public/cashback/balance/:phone', (req, res) => {
         });
       }
       res.json(result[0]);
+    }
+  );
+});
+
+// API для открытия подарка
+app.post('/api/public/gift/open', authenticateToken, (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ error: 'Необходима авторизация' });
+  
+  // Проверяем период активности подарка (20 декабря 2025 - 12 января 2026)
+  const now = new Date();
+  const startDate = new Date('2025-12-20');
+  const endDate = new Date('2026-01-12T23:59:59');
+  
+  if (now < startDate || now > endDate) {
+    return res.status(400).json({ error: 'Период подарка не активен' });
+  }
+  
+  // Проверяем, открывал ли пользователь подарок сегодня
+  const today = now.toISOString().split('T')[0];
+  
+  db.query(
+    'SELECT * FROM gift_opened WHERE user_id = ? AND opened_date = ?',
+    [userId, today],
+    (err, results) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      if (results.length > 0) {
+        return res.status(400).json({ error: 'Вы уже получили подарок сегодня' });
+      }
+      
+      // Генерируем случайный приз
+      const prizes = [
+        { type: 'cashback', description: 'Кешбэк 100 сом', amount: 100 },
+        { type: 'cashback', description: 'Кешбэк 50 сом', amount: 50 },
+        { type: 'cashback', description: 'Кешбэк 200 сом', amount: 200 },
+        { type: 'discount', description: 'Скидка 10% на следующий заказ', amount: 10 },
+        { type: 'discount', description: 'Скидка 15% на следующий заказ', amount: 15 },
+        { type: 'bonus', description: 'Бесплатная доставка', amount: 0 },
+      ];
+      
+      const randomPrize = prizes[Math.floor(Math.random() * prizes.length)];
+      
+      // Получаем телефон пользователя для начисления кешбэка
+      db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+        
+        const userPhone = users[0].phone;
+        
+        // Сохраняем информацию об открытии подарка
+        db.query(
+          'INSERT INTO gift_opened (user_id, opened_date, prize_type, prize_description, amount) VALUES (?, ?, ?, ?, ?)',
+          [userId, today, randomPrize.type, randomPrize.description, randomPrize.amount],
+          (err, result) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            
+            // Если приз - кешбэк, начисляем его
+            if (randomPrize.type === 'cashback' && randomPrize.amount > 0) {
+              db.query(
+                `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+                 VALUES (?, ?, ?, 0, 'bronze')
+                 ON DUPLICATE KEY UPDATE
+                 balance = balance + ?,
+                 total_earned = total_earned + ?`,
+                [userPhone, randomPrize.amount, randomPrize.amount, randomPrize.amount, randomPrize.amount],
+                (err) => {
+                  if (err) {
+                    console.error('Ошибка начисления кешбэка из подарка:', err);
+                  } else {
+                    // Записываем транзакцию
+                    db.query(
+                      'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                      [userPhone, randomPrize.amount, `Новогодний подарок: ${randomPrize.description}`],
+                      () => {}
+                    );
+                  }
+                  
+                  res.json({
+                    success: true,
+                    prize: randomPrize.description,
+                    type: randomPrize.type,
+                    amount: randomPrize.amount,
+                  });
+                }
+              );
+            } else {
+              // Для других типов призов просто возвращаем результат
+              res.json({
+                success: true,
+                prize: randomPrize.description,
+                type: randomPrize.type,
+                amount: randomPrize.amount,
+              });
+            }
+          }
+        );
+      });
     }
   );
 });
