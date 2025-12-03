@@ -1687,12 +1687,45 @@ app.post('/api/public/auth/verify-code', (req, res) => {
         db.query(insertQuery, insertParams, (err, result) => {
           if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
           
-          const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
-          res.json({ 
-            token, 
-            user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
-            isNewUser: true
-          });
+          // Если пользователь зарегистрировался по реферальному коду, начисляем ему бонус
+          if (referrerId) {
+            const newUserBonus = 100; // Бонус для нового пользователя
+            db.query(
+              `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+               VALUES (?, ?, ?, 0, 'bronze')
+               ON DUPLICATE KEY UPDATE
+               balance = balance + ?,
+               total_earned = total_earned + ?`,
+              [cleanPhone, newUserBonus, newUserBonus, newUserBonus, newUserBonus],
+              (err) => {
+                if (err) {
+                  console.error('Ошибка начисления бонуса новому пользователю:', err);
+                } else {
+                  // Записываем транзакцию
+                  db.query(
+                    'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                    [cleanPhone, newUserBonus, `Бонус за регистрацию по реферальному коду`],
+                    () => {}
+                  );
+                  console.log(`Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
+                }
+                
+                const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+                res.json({ 
+                  token, 
+                  user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+                  isNewUser: true
+                });
+              }
+            );
+          } else {
+            const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+            res.json({ 
+              token, 
+              user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+              isNewUser: true
+            });
+          }
         });
       });
     } else {
@@ -2058,12 +2091,45 @@ app.post('/api/public/auth/phone', (req, res) => {
         db.query(insertQuery, insertParams, (err, result) => {
           if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
           
-          const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
-          res.json({ 
-            token, 
-            user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
-            isNewUser: true
-          });
+          // Если пользователь зарегистрировался по реферальному коду, начисляем ему бонус
+          if (referrerId) {
+            const newUserBonus = 100; // Бонус для нового пользователя
+            db.query(
+              `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+               VALUES (?, ?, ?, 0, 'bronze')
+               ON DUPLICATE KEY UPDATE
+               balance = balance + ?,
+               total_earned = total_earned + ?`,
+              [cleanPhone, newUserBonus, newUserBonus, newUserBonus, newUserBonus],
+              (err) => {
+                if (err) {
+                  console.error('Ошибка начисления бонуса новому пользователю:', err);
+                } else {
+                  // Записываем транзакцию
+                  db.query(
+                    'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                    [cleanPhone, newUserBonus, `Бонус за регистрацию по реферальному коду`],
+                    () => {}
+                  );
+                  console.log(`Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
+                }
+                
+                const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+                res.json({ 
+                  token, 
+                  user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+                  isNewUser: true
+                });
+              }
+            );
+          } else {
+            const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+            res.json({ 
+              token, 
+              user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+              isNewUser: true
+            });
+          }
         });
       });
     } else {
