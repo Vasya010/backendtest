@@ -784,19 +784,10 @@ function initializeServer(callback) {
 }
 
 app.get('/api/public/branches', (req, res) => {
-  const { country } = req.query;
+  // Убрана фильтрация по country для упрощения загрузки филиалов
+  const query = 'SELECT id, name, address FROM branches ORDER BY name';
   
-  let query = 'SELECT id, name, address FROM branches';
-  const params = [];
-  
-  if (country) {
-    query += ' WHERE country = ?';
-    params.push(country);
-  }
-  
-  query += ' ORDER BY name';
-  
-  db.query(query, params, (err, branches) => {
+  db.query(query, [], (err, branches) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     res.json(branches);
   });
