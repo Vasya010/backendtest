@@ -38,6 +38,72 @@ const s3Client = new S3Client({
 });
 const S3_BUCKET = 'a2c31109-3cf2c97b-aca1-42b0-a822-3e0ade279447';
 
+// Функция для надежной отправки в Telegram с retry и увеличенными таймаутами
+async function sendTelegramMessage(chatId, text, maxRetries = 3) {
+  const axiosConfig = {
+    timeout: 30000, // 30 секунд таймаут (увеличен для мобильного интернета)
+    headers: {
+      'Content-Type': 'application/json',
+      'Connection': 'keep-alive'
+    },
+    // Дополнительные настройки для нестабильных соединений
+    maxRedirects: 5,
+    validateStatus: function (status) {
+      return status >= 200 && status < 300;
+    }
+  };
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const startTime = Date.now();
+      const response = await axios.post(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          chat_id: chatId,
+          text: text,
+          parse_mode: 'Markdown',
+        },
+        axiosConfig
+      );
+      const duration = Date.now() - startTime;
+      console.log(`✅ Telegram сообщение отправлено успешно (попытка ${attempt}, время: ${duration}ms)`);
+      return { success: true, response: response.data };
+    } catch (error) {
+      const isLastAttempt = attempt === maxRetries;
+      const errorMessage = error.response?.data?.description || error.message;
+      const errorCode = error.response?.data?.error_code;
+      
+      // Детальное логирование для диагностики проблем с сетью
+      const errorDetails = {
+        attempt: `${attempt}/${maxRetries}`,
+        message: errorMessage,
+        telegramErrorCode: errorCode,
+        networkErrorCode: error.code, // Код ошибки axios (ETIMEDOUT, ECONNREFUSED, etc.)
+        status: error.response?.status,
+        isTimeout: error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT'
+      };
+      
+      console.error(`❌ Попытка ${attempt}/${maxRetries} отправки в Telegram не удалась:`, errorDetails);
+      
+      // Если это последняя попытка, возвращаем ошибку
+      if (isLastAttempt) {
+        return { 
+          success: false, 
+          error: errorMessage,
+          errorCode: errorCode,
+          errorResponse: error.response?.data,
+          networkError: error.code
+        };
+      }
+      
+      // Ждем перед следующей попыткой (экспоненциальная задержка)
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      console.log(`⏳ Повторная попытка через ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 function testS3Connection(callback) {
   const command = new PutObjectCommand({
     Bucket: S3_BUCKET,
@@ -1411,30 +1477,36 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         const orderId = result.insertId;
         
-        // Отправляем в Telegram МОМЕНТАЛЬНО, не дожидаясь обработки кешбэка
-        axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: orderText,
-            parse_mode: 'Markdown',
-          }
-        ).then(response => {
-          // Отправка успешна, возвращаем ответ клиенту
-          res.status(200).json({ 
-            message: 'Заказ успешно отправлен', 
-            orderId: orderId,
-            cashbackEarned: cashbackEarned
-          });
-        }).catch(telegramError => {
-          const errorDescription = telegramError.response?.data?.description || telegramError.message;
-          if (telegramError.response?.data?.error_code === 403) {
-            return res.status(500).json({
-              error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
+        // Отправляем в Telegram МОМЕНТАЛЬНО с retry и увеличенными таймаутами
+        // Используем async/await для надежной отправки через мобильный интернет
+        (async () => {
+          try {
+            const result = await sendTelegramMessage(chatId, orderText);
+            if (result.success) {
+              // Отправка успешна, возвращаем ответ клиенту
+              res.status(200).json({ 
+                message: 'Заказ успешно отправлен', 
+                orderId: orderId,
+                cashbackEarned: cashbackEarned
+              });
+            } else {
+              // Обработка ошибок
+              if (result.errorCode === 403) {
+                return res.status(500).json({
+                  error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
+                });
+              }
+              return res.status(500).json({ 
+                error: `Ошибка отправки в Telegram после ${3} попыток: ${result.error}` 
+              });
+            }
+          } catch (error) {
+            console.error('Критическая ошибка при отправке в Telegram:', error);
+            return res.status(500).json({ 
+              error: `Критическая ошибка отправки в Telegram: ${error.message}` 
             });
           }
-          return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
-        });
+        })();
         
         // Обрабатываем кешбэк параллельно (не блокируем отправку в Telegram)
         // Обновляем order_id в транзакциях кешбэка
