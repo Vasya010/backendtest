@@ -1411,6 +1411,32 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         const orderId = result.insertId;
         
+        // Отправляем в Telegram МОМЕНТАЛЬНО, не дожидаясь обработки кешбэка
+        axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: chatId,
+            text: orderText,
+            parse_mode: 'Markdown',
+          }
+        ).then(response => {
+          // Отправка успешна, возвращаем ответ клиенту
+          res.status(200).json({ 
+            message: 'Заказ успешно отправлен', 
+            orderId: orderId,
+            cashbackEarned: cashbackEarned
+          });
+        }).catch(telegramError => {
+          const errorDescription = telegramError.response?.data?.description || telegramError.message;
+          if (telegramError.response?.data?.error_code === 403) {
+            return res.status(500).json({
+              error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
+            });
+          }
+          return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
+        });
+        
+        // Обрабатываем кешбэк параллельно (не блокируем отправку в Telegram)
         // Обновляем order_id в транзакциях кешбэка
         if (userId && userPhone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
           db.query(
@@ -1419,31 +1445,8 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
             () => {}
           );
         }
-        
-        // Обрабатываем кешбэк, затем отправляем в Telegram
         processCashback(() => {
-          axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: chatId,
-              text: orderText,
-              parse_mode: 'Markdown',
-            }
-          ).then(response => {
-            res.status(200).json({ 
-              message: 'Заказ успешно отправлен', 
-              orderId: orderId,
-              cashbackEarned: cashbackEarned
-            });
-          }).catch(telegramError => {
-            const errorDescription = telegramError.response?.data?.description || telegramError.message;
-            if (telegramError.response?.data?.error_code === 403) {
-              return res.status(500).json({
-                error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
-              });
-            }
-            return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
-          });
+          // Кешбэк обработан, но это не блокирует отправку в Telegram
         });
       }
     );
