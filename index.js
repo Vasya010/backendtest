@@ -38,6 +38,72 @@ const s3Client = new S3Client({
 });
 const S3_BUCKET = 'a2c31109-3cf2c97b-aca1-42b0-a822-3e0ade279447';
 
+// Функция для надежной отправки в Telegram с retry и увеличенными таймаутами
+async function sendTelegramMessage(chatId, text, maxRetries = 3) {
+  const axiosConfig = {
+    timeout: 30000, // 30 секунд таймаут (увеличен для мобильного интернета)
+    headers: {
+      'Content-Type': 'application/json',
+      'Connection': 'keep-alive'
+    },
+    // Дополнительные настройки для нестабильных соединений
+    maxRedirects: 5,
+    validateStatus: function (status) {
+      return status >= 200 && status < 300;
+    }
+  };
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const startTime = Date.now();
+      const response = await axios.post(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          chat_id: chatId,
+          text: text,
+          parse_mode: 'Markdown',
+        },
+        axiosConfig
+      );
+      const duration = Date.now() - startTime;
+      console.log(`✅ Telegram сообщение отправлено успешно (попытка ${attempt}, время: ${duration}ms)`);
+      return { success: true, response: response.data };
+    } catch (error) {
+      const isLastAttempt = attempt === maxRetries;
+      const errorMessage = error.response?.data?.description || error.message;
+      const errorCode = error.response?.data?.error_code;
+      
+      // Детальное логирование для диагностики проблем с сетью
+      const errorDetails = {
+        attempt: `${attempt}/${maxRetries}`,
+        message: errorMessage,
+        telegramErrorCode: errorCode,
+        networkErrorCode: error.code, // Код ошибки axios (ETIMEDOUT, ECONNREFUSED, etc.)
+        status: error.response?.status,
+        isTimeout: error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT'
+      };
+      
+      console.error(`❌ Попытка ${attempt}/${maxRetries} отправки в Telegram не удалась:`, errorDetails);
+      
+      // Если это последняя попытка, возвращаем ошибку
+      if (isLastAttempt) {
+        return { 
+          success: false, 
+          error: errorMessage,
+          errorCode: errorCode,
+          errorResponse: error.response?.data,
+          networkError: error.code
+        };
+      }
+      
+      // Ждем перед следующей попыткой (экспоненциальная задержка)
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      console.log(`⏳ Повторная попытка через ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 function testS3Connection(callback) {
   const command = new PutObjectCommand({
     Bucket: S3_BUCKET,
@@ -462,6 +528,29 @@ function initializeServer(callback) {
               connection.release();
               return callback(err);
             }
+            createGiftTable();
+          });
+        }
+        function createGiftTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS gift_opened (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              user_id INT NOT NULL,
+              opened_date DATE NOT NULL,
+              prize_type VARCHAR(50) NOT NULL,
+              prize_description TEXT,
+              amount DECIMAL(10,2),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE KEY unique_user_date (user_id, opened_date),
+              INDEX idx_user_id (user_id),
+              INDEX idx_opened_date (opened_date),
+              FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              connection.release();
+              return callback(err);
+            }
             createUsersTable();
           });
         }
@@ -521,10 +610,44 @@ function initializeServer(callback) {
                           connection.release();
                           return callback(err);
                         }
-                        createStoriesTable();
+                        // Проверяем наличие поля referrer_id
+                        connection.query('SHOW COLUMNS FROM app_users LIKE "referrer_id"', (err, referrerColumns) => {
+                          if (err) {
+                            connection.release();
+                            return callback(err);
+                          }
+                          if (referrerColumns.length === 0) {
+                            connection.query('ALTER TABLE app_users ADD COLUMN referrer_id INT NULL, ADD INDEX idx_referrer_id (referrer_id)', (err) => {
+                              if (err) {
+                                connection.release();
+                                return callback(err);
+                              }
+                              createStoriesTable();
+                            });
+                          } else {
+                            createStoriesTable();
+                          }
+                        });
                       });
                     } else {
-                      createStoriesTable();
+                      // Проверяем наличие поля referrer_id
+                      connection.query('SHOW COLUMNS FROM app_users LIKE "referrer_id"', (err, referrerColumns) => {
+                        if (err) {
+                          connection.release();
+                          return callback(err);
+                        }
+                        if (referrerColumns.length === 0) {
+                          connection.query('ALTER TABLE app_users ADD COLUMN referrer_id INT NULL, ADD INDEX idx_referrer_id (referrer_id)', (err) => {
+                            if (err) {
+                              connection.release();
+                              return callback(err);
+                            }
+                            createStoriesTable();
+                          });
+                        } else {
+                          createStoriesTable();
+                        }
+                      });
                     }
                   });
                 });
@@ -750,24 +873,10 @@ function initializeServer(callback) {
 }
 
 app.get('/api/public/branches', (req, res) => {
-  const { country, city } = req.query;
+  // Убрана фильтрация по country для упрощения загрузки филиалов
+  const query = 'SELECT id, name, address FROM branches ORDER BY name';
   
-  let query = 'SELECT id, name, address, country, city FROM branches WHERE 1=1';
-  const params = [];
-  
-  if (country) {
-    query += ' AND country = ?';
-    params.push(country);
-  }
-  
-  if (city) {
-    query += ' AND city = ?';
-    params.push(city);
-  }
-  
-  query += ' ORDER BY name';
-  
-  db.query(query, params, (err, branches) => {
+  db.query(query, [], (err, branches) => {
     if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     res.json(branches);
   });
@@ -1282,6 +1391,38 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         const orderId = result.insertId;
         
+        // Отправляем в Telegram МОМЕНТАЛЬНО с retry и увеличенными таймаутами
+        // Используем async/await для надежной отправки через мобильный интернет
+        (async () => {
+          try {
+            const result = await sendTelegramMessage(chatId, orderText);
+            if (result.success) {
+              // Отправка успешна, возвращаем ответ клиенту
+              res.status(200).json({ 
+                message: 'Заказ успешно отправлен', 
+                orderId: orderId,
+                cashbackEarned: cashbackEarned
+              });
+            } else {
+              // Обработка ошибок
+              if (result.errorCode === 403) {
+                return res.status(500).json({
+                  error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
+                });
+              }
+              return res.status(500).json({ 
+                error: `Ошибка отправки в Telegram после ${3} попыток: ${result.error}` 
+              });
+            }
+          } catch (error) {
+            console.error('Критическая ошибка при отправке в Telegram:', error);
+            return res.status(500).json({ 
+              error: `Критическая ошибка отправки в Telegram: ${error.message}` 
+            });
+          }
+        })();
+        
+        // Обрабатываем кешбэк параллельно (не блокируем отправку в Telegram)
         // Обновляем order_id в транзакциях кешбэка
         if (userId && userPhone && (cashbackUsedAmount > 0 || cashbackEarned > 0)) {
           db.query(
@@ -1290,31 +1431,8 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
             () => {}
           );
         }
-        
-        // Обрабатываем кешбэк, затем отправляем в Telegram
         processCashback(() => {
-          axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: chatId,
-              text: orderText,
-              parse_mode: 'Markdown',
-            }
-          ).then(response => {
-            res.status(200).json({ 
-              message: 'Заказ успешно отправлен', 
-              orderId: orderId,
-              cashbackEarned: cashbackEarned
-            });
-          }).catch(telegramError => {
-            const errorDescription = telegramError.response?.data?.description || telegramError.message;
-            if (telegramError.response?.data?.error_code === 403) {
-              return res.status(500).json({
-                error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
-              });
-            }
-            return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
-          });
+          // Кешбэк обработан, но это не блокирует отправку в Telegram
         });
       }
     );
@@ -1474,7 +1592,7 @@ app.post('/api/public/auth/send-code', async (req, res) => {
 
 // API для проверки SMS кода и входа/регистрации
 app.post('/api/public/auth/verify-code', (req, res) => {
-  const { phone, code } = req.body;
+  const { phone, code, referral_code } = req.body;
   if (!phone || !code) {
     return res.status(400).json({ error: 'Телефон и код обязательны' });
   }
@@ -1510,14 +1628,107 @@ app.post('/api/public/auth/verify-code', (req, res) => {
     if (users.length === 0) {
       // Регистрация нового пользователя
       const userCode = generateUserCode();
-      db.query('INSERT INTO app_users (phone, user_code) VALUES (?, ?)', [cleanPhone, userCode], (err, result) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      // Обрабатываем реферальный код
+      const processReferral = (callback) => {
+        if (!referral_code || !/^\d{6}$/.test(referral_code)) {
+          return callback(null);
+        }
         
-        const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ 
-          token, 
-          user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
-          isNewUser: true
+        // Находим реферера по коду
+        db.query('SELECT id, phone FROM app_users WHERE user_code = ?', [referral_code], (err, referrers) => {
+          if (err) {
+            console.error('Ошибка поиска реферера:', err);
+            return callback(null);
+          }
+          
+          if (referrers.length === 0) {
+            // Реферальный код не найден, но продолжаем регистрацию
+            return callback(null);
+          }
+          
+          const referrer = referrers[0];
+          const referrerId = referrer.id;
+          const referrerPhone = referrer.phone;
+          
+          // Начисляем бонус рефереру (например, 100 сом)
+          const referralBonus = 100;
+          db.query(
+            `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+             VALUES (?, ?, ?, 0, 'bronze')
+             ON DUPLICATE KEY UPDATE
+             balance = balance + ?,
+             total_earned = total_earned + ?`,
+            [referrerPhone, referralBonus, referralBonus, referralBonus, referralBonus],
+            (err) => {
+              if (err) {
+                console.error('Ошибка начисления бонуса рефереру:', err);
+              } else {
+                // Записываем транзакцию
+                db.query(
+                  'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                  [referrerPhone, referralBonus, `Бонус за приглашение пользователя`],
+                  () => {}
+                );
+                console.log(`Начислен бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение`);
+              }
+              callback(referrerId);
+            }
+          );
+        });
+      };
+      
+      processReferral((referrerId) => {
+        // Регистрируем нового пользователя
+        const insertQuery = referrerId 
+          ? 'INSERT INTO app_users (phone, user_code, referrer_id) VALUES (?, ?, ?)'
+          : 'INSERT INTO app_users (phone, user_code) VALUES (?, ?)';
+        const insertParams = referrerId 
+          ? [cleanPhone, userCode, referrerId]
+          : [cleanPhone, userCode];
+        
+        db.query(insertQuery, insertParams, (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          
+          // Если пользователь зарегистрировался по реферальному коду, начисляем ему бонус
+          if (referrerId) {
+            const newUserBonus = 100; // Бонус для нового пользователя
+            db.query(
+              `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+               VALUES (?, ?, ?, 0, 'bronze')
+               ON DUPLICATE KEY UPDATE
+               balance = balance + ?,
+               total_earned = total_earned + ?`,
+              [cleanPhone, newUserBonus, newUserBonus, newUserBonus, newUserBonus],
+              (err) => {
+                if (err) {
+                  console.error('Ошибка начисления бонуса новому пользователю:', err);
+                } else {
+                  // Записываем транзакцию
+                  db.query(
+                    'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                    [cleanPhone, newUserBonus, `Бонус за регистрацию по реферальному коду`],
+                    () => {}
+                  );
+                  console.log(`Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
+                }
+                
+                const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+                res.json({ 
+                  token, 
+                  user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+                  isNewUser: true
+                });
+              }
+            );
+          } else {
+            const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+            res.json({ 
+              token, 
+              user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+              isNewUser: true
+            });
+          }
         });
       });
     } else {
@@ -1805,7 +2016,7 @@ app.post('/api/admin/cashback/subtract-by-code', authenticateToken, (req, res) =
 
 // API для входа/регистрации по телефону (старый метод, оставляем для совместимости)
 app.post('/api/public/auth/phone', (req, res) => {
-  const { phone } = req.body;
+  const { phone, referral_code } = req.body;
   if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
   
   // Очищаем телефон от лишних символов
@@ -1821,14 +2032,107 @@ app.post('/api/public/auth/phone', (req, res) => {
     if (users.length === 0) {
       // Регистрация нового пользователя
       const userCode = generateUserCode();
-      db.query('INSERT INTO app_users (phone, user_code) VALUES (?, ?)', [cleanPhone, userCode], (err, result) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      // Обрабатываем реферальный код
+      const processReferral = (callback) => {
+        if (!referral_code || !/^\d{6}$/.test(referral_code)) {
+          return callback(null);
+        }
         
-        const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ 
-          token, 
-          user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
-          isNewUser: true
+        // Находим реферера по коду
+        db.query('SELECT id, phone FROM app_users WHERE user_code = ?', [referral_code], (err, referrers) => {
+          if (err) {
+            console.error('Ошибка поиска реферера:', err);
+            return callback(null);
+          }
+          
+          if (referrers.length === 0) {
+            // Реферальный код не найден, но продолжаем регистрацию
+            return callback(null);
+          }
+          
+          const referrer = referrers[0];
+          const referrerId = referrer.id;
+          const referrerPhone = referrer.phone;
+          
+          // Начисляем бонус рефереру (например, 100 сом)
+          const referralBonus = 100;
+          db.query(
+            `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+             VALUES (?, ?, ?, 0, 'bronze')
+             ON DUPLICATE KEY UPDATE
+             balance = balance + ?,
+             total_earned = total_earned + ?`,
+            [referrerPhone, referralBonus, referralBonus, referralBonus, referralBonus],
+            (err) => {
+              if (err) {
+                console.error('Ошибка начисления бонуса рефереру:', err);
+              } else {
+                // Записываем транзакцию
+                db.query(
+                  'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                  [referrerPhone, referralBonus, `Бонус за приглашение пользователя`],
+                  () => {}
+                );
+                console.log(`Начислен бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение`);
+              }
+              callback(referrerId);
+            }
+          );
+        });
+      };
+      
+      processReferral((referrerId) => {
+        // Регистрируем нового пользователя
+        const insertQuery = referrerId 
+          ? 'INSERT INTO app_users (phone, user_code, referrer_id) VALUES (?, ?, ?)'
+          : 'INSERT INTO app_users (phone, user_code) VALUES (?, ?)';
+        const insertParams = referrerId 
+          ? [cleanPhone, userCode, referrerId]
+          : [cleanPhone, userCode];
+        
+        db.query(insertQuery, insertParams, (err, result) => {
+          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          
+          // Если пользователь зарегистрировался по реферальному коду, начисляем ему бонус
+          if (referrerId) {
+            const newUserBonus = 100; // Бонус для нового пользователя
+            db.query(
+              `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+               VALUES (?, ?, ?, 0, 'bronze')
+               ON DUPLICATE KEY UPDATE
+               balance = balance + ?,
+               total_earned = total_earned + ?`,
+              [cleanPhone, newUserBonus, newUserBonus, newUserBonus, newUserBonus],
+              (err) => {
+                if (err) {
+                  console.error('Ошибка начисления бонуса новому пользователю:', err);
+                } else {
+                  // Записываем транзакцию
+                  db.query(
+                    'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                    [cleanPhone, newUserBonus, `Бонус за регистрацию по реферальному коду`],
+                    () => {}
+                  );
+                  console.log(`Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
+                }
+                
+                const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+                res.json({ 
+                  token, 
+                  user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+                  isNewUser: true
+                });
+              }
+            );
+          } else {
+            const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
+            res.json({ 
+              token, 
+              user: { id: result.insertId, phone: cleanPhone, name: null, user_code: userCode },
+              isNewUser: true
+            });
+          }
         });
       });
     } else {
@@ -2072,6 +2376,104 @@ app.get('/api/public/cashback/balance/:phone', (req, res) => {
         });
       }
       res.json(result[0]);
+    }
+  );
+});
+
+// API для открытия подарка
+app.post('/api/public/gift/open', authenticateToken, (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ error: 'Необходима авторизация' });
+  
+  // Проверяем период активности подарка (20 декабря 2025 - 12 января 2026)
+  const now = new Date();
+  const startDate = new Date('2025-12-20');
+  const endDate = new Date('2026-01-12T23:59:59');
+  
+  if (now < startDate || now > endDate) {
+    return res.status(400).json({ error: 'Период подарка не активен' });
+  }
+  
+  // Проверяем, открывал ли пользователь подарок сегодня
+  const today = now.toISOString().split('T')[0];
+  
+  db.query(
+    'SELECT * FROM gift_opened WHERE user_id = ? AND opened_date = ?',
+    [userId, today],
+    (err, results) => {
+      if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+      
+      if (results.length > 0) {
+        return res.status(400).json({ error: 'Вы уже получили подарок сегодня' });
+      }
+      
+      // Генерируем случайный приз
+      const prizes = [
+        { type: 'cashback', description: 'Кешбэк 100 сом', amount: 100 },
+        { type: 'cashback', description: 'Кешбэк 50 сом', amount: 50 },
+        { type: 'cashback', description: 'Кешбэк 200 сом', amount: 200 },
+        { type: 'discount', description: 'Скидка 10% на следующий заказ', amount: 10 },
+        { type: 'discount', description: 'Скидка 15% на следующий заказ', amount: 15 },
+        { type: 'bonus', description: 'Бесплатная доставка', amount: 0 },
+      ];
+      
+      const randomPrize = prizes[Math.floor(Math.random() * prizes.length)];
+      
+      // Получаем телефон пользователя для начисления кешбэка
+      db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+        
+        const userPhone = users[0].phone;
+        
+        // Сохраняем информацию об открытии подарка
+        db.query(
+          'INSERT INTO gift_opened (user_id, opened_date, prize_type, prize_description, amount) VALUES (?, ?, ?, ?, ?)',
+          [userId, today, randomPrize.type, randomPrize.description, randomPrize.amount],
+          (err, result) => {
+            if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+            
+            // Если приз - кешбэк, начисляем его
+            if (randomPrize.type === 'cashback' && randomPrize.amount > 0) {
+              db.query(
+                `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
+                 VALUES (?, ?, ?, 0, 'bronze')
+                 ON DUPLICATE KEY UPDATE
+                 balance = balance + ?,
+                 total_earned = total_earned + ?`,
+                [userPhone, randomPrize.amount, randomPrize.amount, randomPrize.amount, randomPrize.amount],
+                (err) => {
+                  if (err) {
+                    console.error('Ошибка начисления кешбэка из подарка:', err);
+                  } else {
+                    // Записываем транзакцию
+                    db.query(
+                      'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, NULL, "earned", ?, ?)',
+                      [userPhone, randomPrize.amount, `Новогодний подарок: ${randomPrize.description}`],
+                      () => {}
+                    );
+                  }
+                  
+                  res.json({
+                    success: true,
+                    prize: randomPrize.description,
+                    type: randomPrize.type,
+                    amount: randomPrize.amount,
+                  });
+                }
+              );
+            } else {
+              // Для других типов призов просто возвращаем результат
+              res.json({
+                success: true,
+                prize: randomPrize.description,
+                type: randomPrize.type,
+                amount: randomPrize.amount,
+              });
+            }
+          }
+        );
+      });
     }
   );
 });
