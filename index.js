@@ -1526,6 +1526,188 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
   });
 });
 
+// Endpoint для синхронизации офлайн заказов (массовая отправка)
+app.post('/api/public/sync-offline-orders', optionalAuthenticateToken, (req, res) => {
+  const { orders } = req.body;
+  
+  if (!orders || !Array.isArray(orders) || orders.length === 0) {
+    return res.status(400).json({ error: 'Не переданы заказы для синхронизации' });
+  }
+
+  const userId = req.user?.id;
+  const results = [];
+  let processedCount = 0;
+  const totalOrders = orders.length;
+
+  // Обрабатываем каждый заказ
+  orders.forEach((orderData, index) => {
+    const { 
+      localOrderId, 
+      branchId, 
+      orderDetails, 
+      deliveryDetails, 
+      cartItems, 
+      discount, 
+      promoCode, 
+      paymentMethod, 
+      cashbackUsed 
+    } = orderData;
+
+    if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
+      results.push({
+        localOrderId: localOrderId || `order_${index}`,
+        success: false,
+        error: 'Корзина пуста'
+      });
+      processedCount++;
+      if (processedCount === totalOrders) {
+        return res.json({ results, synced: results.filter(r => r.success).length });
+      }
+      return;
+    }
+
+    if (!branchId) {
+      results.push({
+        localOrderId: localOrderId || `order_${index}`,
+        success: false,
+        error: 'Не указан филиал'
+      });
+      processedCount++;
+      if (processedCount === totalOrders) {
+        return res.json({ results, synced: results.filter(r => r.success).length });
+      }
+      return;
+    }
+
+    const phone = orderDetails?.phone || deliveryDetails?.phone;
+    
+    db.query('SELECT name, telegram_chat_id FROM branches WHERE id = ?', [branchId], (err, branch) => {
+      if (err || branch.length === 0) {
+        results.push({
+          localOrderId: localOrderId || `order_${index}`,
+          success: false,
+          error: 'Филиал не найден'
+        });
+        processedCount++;
+        if (processedCount === totalOrders) {
+          return res.json({ results, synced: results.filter(r => r.success).length });
+        }
+        return;
+      }
+
+      const branchName = branch[0].name;
+      const chatId = branch[0].telegram_chat_id;
+      
+      if (!chatId) {
+        results.push({
+          localOrderId: localOrderId || `order_${index}`,
+          success: false,
+          error: 'Telegram chat ID не настроен'
+        });
+        processedCount++;
+        if (processedCount === totalOrders) {
+          return res.json({ results, synced: results.filter(r => r.success).length });
+        }
+        return;
+      }
+
+      const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
+      const discountedTotal = total * (1 - (discount || 0) / 100);
+      const cashbackUsedAmount = userId ? (Number(cashbackUsed) || 0) : 0;
+      const cashbackEarned = userId ? Math.round(discountedTotal * 0.07) : 0;
+      const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount);
+
+      const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
+      const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
+      
+      const orderText = `
+📦 *Новый заказ (офлайн):*
+🏪 Филиал: ${escapeMarkdown(branchName)}
+👤 Имя: ${escapeMarkdown(orderDetails?.name || deliveryDetails?.name)}
+📞 Телефон: ${escapeMarkdown(phone)}
+📝 Комментарии: ${escapeMarkdown(orderDetails?.comments || deliveryDetails?.comments || "Нет")}
+📍 Адрес доставки: ${escapeMarkdown(deliveryDetails?.address || "Самовывоз")}
+💳 Способ оплаты: ${escapeMarkdown(paymentMethodText)}
+🛒 *Товары:*
+${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт. по ${item.originalPrice} сом)`).join('\n')}
+💰 Сумма товаров: ${total.toFixed(2)} сом
+${discount > 0 ? `💸 Скидка (${discount}%): -${(total * discount / 100).toFixed(2)} сом` : ''}
+${cashbackUsedAmount > 0 ? `🎁 Кешбэк использован: -${cashbackUsedAmount.toFixed(2)} сом` : ''}
+${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toFixed(2)} сом` : ''}
+💰 *Итоговая сумма: ${finalTotal.toFixed(2)} сом*
+      `;
+
+      db.query(
+        `INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code, cashback_used)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+        [
+          branchId,
+          finalTotal,
+          JSON.stringify(orderDetails || {}),
+          JSON.stringify(deliveryDetails || {}),
+          JSON.stringify(cartItems),
+          discount || 0,
+          promoCode || null,
+          cashbackUsedAmount,
+        ],
+        (err, result) => {
+          if (err) {
+            results.push({
+              localOrderId: localOrderId || `order_${index}`,
+              success: false,
+              error: `Ошибка БД: ${err.message}`
+            });
+            processedCount++;
+            if (processedCount === totalOrders) {
+              return res.json({ results, synced: results.filter(r => r.success).length });
+            }
+            return;
+          }
+
+          const orderId = result.insertId;
+
+          // Отправляем в Telegram асинхронно
+          sendTelegramMessage(chatId, orderText).then((telegramResult) => {
+            results.push({
+              localOrderId: localOrderId || `order_${index}`,
+              success: true,
+              orderId: orderId,
+              cashbackEarned: cashbackEarned
+            });
+            processedCount++;
+            
+            if (processedCount === totalOrders) {
+              return res.json({ 
+                results, 
+                synced: results.filter(r => r.success).length,
+                total: totalOrders
+              });
+            }
+          }).catch((error) => {
+            // Заказ сохранен в БД, но Telegram не отправился - все равно успех
+            results.push({
+              localOrderId: localOrderId || `order_${index}`,
+              success: true,
+              orderId: orderId,
+              cashbackEarned: cashbackEarned,
+              warning: 'Заказ сохранен, но не отправлен в Telegram'
+            });
+            processedCount++;
+            
+            if (processedCount === totalOrders) {
+              return res.json({ 
+                results, 
+                synced: results.filter(r => r.success).length,
+                total: totalOrders
+              });
+            }
+          });
+        }
+      );
+    });
+  });
+});
+
 // Хранилище для SMS кодов (в продакшене использовать Redis или БД)
 const smsCodes = new Map();
 
