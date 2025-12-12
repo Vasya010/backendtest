@@ -38,16 +38,15 @@ const s3Client = new S3Client({
 });
 const S3_BUCKET = 'a2c31109-3cf2c97b-aca1-42b0-a822-3e0ade279447';
 
-// Функция для надежной отправки в Telegram с retry и увеличенными таймаутами
-async function sendTelegramMessage(chatId, text, maxRetries = 3) {
+// Функция для МОМЕНТАЛЬНОЙ отправки в Telegram (быстрая, неблокирующая)
+async function sendTelegramMessage(chatId, text, maxRetries = 2) {
   const axiosConfig = {
-    timeout: 30000, // 30 секунд таймаут (увеличен для мобильного интернета)
+    timeout: 5000, // 5 секунд таймаут (быстро для моментальной отправки)
     headers: {
       'Content-Type': 'application/json',
       'Connection': 'keep-alive'
     },
-    // Дополнительные настройки для нестабильных соединений
-    maxRedirects: 5,
+    maxRedirects: 3,
     validateStatus: function (status) {
       return status >= 200 && status < 300;
     }
@@ -66,24 +65,14 @@ async function sendTelegramMessage(chatId, text, maxRetries = 3) {
         axiosConfig
       );
       const duration = Date.now() - startTime;
-      console.log(`✅ Telegram сообщение отправлено успешно (попытка ${attempt}, время: ${duration}ms)`);
+      console.log(`✅ Telegram сообщение отправлено МОМЕНТАЛЬНО (попытка ${attempt}, время: ${duration}ms)`);
       return { success: true, response: response.data };
     } catch (error) {
       const isLastAttempt = attempt === maxRetries;
       const errorMessage = error.response?.data?.description || error.message;
       const errorCode = error.response?.data?.error_code;
       
-      // Детальное логирование для диагностики проблем с сетью
-      const errorDetails = {
-        attempt: `${attempt}/${maxRetries}`,
-        message: errorMessage,
-        telegramErrorCode: errorCode,
-        networkErrorCode: error.code, // Код ошибки axios (ETIMEDOUT, ECONNREFUSED, etc.)
-        status: error.response?.status,
-        isTimeout: error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT'
-      };
-      
-      console.error(`❌ Попытка ${attempt}/${maxRetries} отправки в Telegram не удалась:`, errorDetails);
+      console.error(`❌ Попытка ${attempt}/${maxRetries} отправки в Telegram:`, errorMessage);
       
       // Если это последняя попытка, возвращаем ошибку
       if (isLastAttempt) {
@@ -96,12 +85,26 @@ async function sendTelegramMessage(chatId, text, maxRetries = 3) {
         };
       }
       
-      // Ждем перед следующей попыткой (экспоненциальная задержка)
-      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-      console.log(`⏳ Повторная попытка через ${delay}ms...`);
+      // Минимальная задержка между попытками (100-300ms для быстроты)
+      const delay = Math.min(100 * attempt, 300);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
+}
+
+// Функция для неблокирующей отправки в Telegram (fire and forget)
+function sendTelegramMessageAsync(chatId, text) {
+  // Запускаем асинхронно, не ждем результата
+  setImmediate(async () => {
+    try {
+      const result = await sendTelegramMessage(chatId, text);
+      if (!result.success) {
+        console.error('⚠️ Не удалось отправить сообщение в Telegram (некритично):', result.error);
+      }
+    } catch (error) {
+      console.error('⚠️ Ошибка при асинхронной отправке в Telegram (некритично):', error.message);
+    }
+  });
 }
 
 function testS3Connection(callback) {
@@ -115,19 +118,89 @@ function testS3Connection(callback) {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { 
+    fileSize: 5 * 1024 * 1024, // 5MB
+    files: 1,
+    fields: 50
+  },
+  fileFilter: (req, file, cb) => {
+    // Разрешаем только изображения
+    const allowedMimes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Неподдерживаемый тип файла. Разрешены только изображения (JPEG, PNG, GIF, WebP)'));
+    }
+  }
 }).single('image');
 
+// Улучшенная функция загрузки в S3 с обработкой ошибок
 function uploadToS3(file, callback) {
-  const key = `pizza-images/${Date.now()}${path.extname(file.originalname)}`;
-  const params = {
-    Bucket: S3_BUCKET,
-    Key: key,
-    Body: file.buffer,
-    ContentType: file.mimetype,
-  };
-  const upload = new Upload({ client: s3Client, params });
-  upload.done().then(() => callback(null, key)).catch(callback);
+  try {
+    if (!file || !file.buffer) {
+      return callback(new Error('Файл не найден или поврежден'));
+    }
+    
+    const key = `pizza-images/${Date.now()}-${Math.random().toString(36).substring(7)}${path.extname(file.originalname)}`;
+    const params = {
+      Bucket: S3_BUCKET,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype || 'image/jpeg',
+    };
+    
+    const upload = new Upload({ 
+      client: s3Client, 
+      params,
+      queueSize: 4,
+      partSize: 1024 * 1024 * 5, // 5MB chunks
+    });
+    
+    upload.done()
+      .then(() => {
+        console.log(`✅ Файл успешно загружен в S3: ${key}`);
+        callback(null, key);
+      })
+      .catch((err) => {
+        console.error('❌ Ошибка загрузки в S3:', err);
+        callback(new Error(`Ошибка загрузки файла: ${err.message || 'Неизвестная ошибка'}`));
+      });
+  } catch (error) {
+    console.error('❌ Ошибка при подготовке загрузки в S3:', error);
+    callback(new Error(`Ошибка обработки файла: ${error.message || 'Неизвестная ошибка'}`));
+  }
+}
+
+// Универсальный обработчик ошибок multer
+function handleUploadError(err, req, res, next) {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ 
+        error: 'Файл слишком большой. Максимальный размер: 5MB' 
+      });
+    }
+    if (err.code === 'LIMIT_FILE_COUNT') {
+      return res.status(400).json({ 
+        error: 'Слишком много файлов. Разрешено только одно изображение' 
+      });
+    }
+    if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+      return res.status(400).json({ 
+        error: 'Неожиданное поле файла. Используйте поле "image"' 
+      });
+    }
+    return res.status(400).json({ 
+      error: `Ошибка загрузки файла: ${err.message}` 
+    });
+  }
+  
+  if (err) {
+    return res.status(400).json({ 
+      error: err.message || 'Ошибка загрузки файла' 
+    });
+  }
+  
+  next();
 }
 
 function getFromS3(key, callback) {
@@ -1311,16 +1384,16 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
   const userId = req.user?.id; // Получаем ID пользователя из токена (если есть)
   const phone = orderDetails.phone || deliveryDetails.phone;
   
-  // Получаем телефон пользователя из базы, если авторизован
-  const getUserPhone = (callback) => {
+  // Получаем телефон и код пользователя из базы, если авторизован
+  const getUserData = (callback) => {
     if (!userId) {
-      return callback(phone);
+      return callback({ phone, userCode: null });
     }
-    db.query('SELECT phone FROM app_users WHERE id = ?', [userId], (err, users) => {
+    db.query('SELECT phone, user_code FROM app_users WHERE id = ?', [userId], (err, users) => {
       if (err || users.length === 0) {
-        return callback(phone);
+        return callback({ phone, userCode: null });
       }
-      callback(users[0].phone);
+      callback({ phone: users[0].phone, userCode: users[0].user_code || null });
     });
   };
   
@@ -1337,115 +1410,29 @@ app.post('/api/public/send-order', optionalAuthenticateToken, (req, res) => {
     
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
-    const cashbackUsedAmount = userId ? (Number(cashbackUsed) || 0) : 0; // Кешбэк только для авторизованных
     
-    // Кешбэк начисляется только для авторизованных пользователей
-    const cashbackEarned = userId ? Math.round(discountedTotal * 0.07) : 0; // 7% кешбэк
-    const finalTotal = Math.max(0, discountedTotal - cashbackUsedAmount);
+    // Временно отключаем использование и начисление кешбэка
+    const cashbackUsedAmount = 0;
+    const cashbackEarned = 0;
+    const finalTotal = Math.max(0, discountedTotal);
     
     const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
     const paymentMethodText = paymentMethod === 'cash' ? 'Наличными' : paymentMethod === 'card' ? 'Картой' : 'Не указан';
     
-    // Получаем телефон пользователя и обрабатываем заказ
-    getUserPhone((userPhone) => {
-      // Обрабатываем кешбэк (только для авторизованных пользователей)
-      const processCashback = (callback) => {
-        if (!userId || !userPhone) {
-          return callback();
-        }
+    // Получаем данные пользователя и обрабатываем заказ
+    getUserData((userData) => {
+      const userPhone = userData.phone;
+      const userCode = userData.userCode;
       
-      // Списываем использованный кешбэк
-      if (cashbackUsedAmount > 0) {
-        db.query(
-          'UPDATE cashback_balance SET balance = balance - ?, total_spent = total_spent + ? WHERE phone = ? AND balance >= ?',
-          [cashbackUsedAmount, cashbackUsedAmount, userPhone, cashbackUsedAmount],
-          (err, result) => {
-            if (err) {
-              console.error('Ошибка списания кешбэка:', err);
-              return callback();
-            }
-            if (result.affectedRows > 0) {
-              // Записываем транзакцию списания
-              db.query(
-                'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "spent", ?, ?)',
-                [userPhone, null, cashbackUsedAmount, 'Использование кешбэка для оплаты заказа'],
-                () => {}
-              );
-            }
-            // Начисляем новый кешбэк
-            if (cashbackEarned > 0) {
-              db.query(
-                `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
-                 VALUES (?, ?, ?, 1, 'bronze')
-                 ON DUPLICATE KEY UPDATE
-                 balance = balance + ?,
-                 total_earned = total_earned + ?,
-                 total_orders = total_orders + 1,
-                 user_level = CASE
-                   WHEN total_orders + 1 >= 100 THEN 'platinum'
-                   WHEN total_orders + 1 >= 50 THEN 'gold'
-                   WHEN total_orders + 1 >= 10 THEN 'silver'
-                   ELSE 'bronze'
-                 END`,
-                [userPhone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
-                (err) => {
-                  if (err) {
-                    console.error('Ошибка начисления кешбэка:', err);
-                    return callback();
-                  }
-                  // Записываем транзакцию начисления
-                  db.query(
-                    'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-                    [userPhone, null, cashbackEarned, 'Кешбэк за заказ'],
-                    () => {}
-                  );
-                  callback();
-                }
-              );
-            } else {
-              callback();
-            }
-          }
-        );
-      } else if (cashbackEarned > 0) {
-        // Только начисляем кешбэк
-        db.query(
-          `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
-           VALUES (?, ?, ?, 1, 'bronze')
-           ON DUPLICATE KEY UPDATE
-           balance = balance + ?,
-           total_earned = total_earned + ?,
-           total_orders = total_orders + 1,
-           user_level = CASE
-             WHEN total_orders + 1 >= 100 THEN 'platinum'
-             WHEN total_orders + 1 >= 50 THEN 'gold'
-             WHEN total_orders + 1 >= 10 THEN 'silver'
-             ELSE 'bronze'
-           END`,
-          [userPhone, cashbackEarned, cashbackEarned, cashbackEarned, cashbackEarned],
-          (err) => {
-            if (err) {
-              console.error('Ошибка начисления кешбэка:', err);
-              return callback();
-            }
-            db.query(
-              'INSERT INTO cashback_transactions (phone, order_id, type, amount, description) VALUES (?, ?, "earned", ?, ?)',
-              [userPhone, null, cashbackEarned, 'Кешбэк за заказ'],
-              () => {}
-            );
-            callback();
-          }
-        );
-      } else {
-        callback();
-      }
-    };
+      // Кешбэк временно не обрабатываем
+      const processCashback = (callback) => callback();
     
     const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
 👤 Имя: ${escapeMarkdown(orderDetails.name || deliveryDetails.name)}
 📞 Телефон: ${escapeMarkdown(phone)}
+🔑 Код клиента: ${escapeMarkdown(userCode || "—")}
 📝 Комментарии: ${escapeMarkdown(orderDetails.comments || deliveryDetails.comments || "Нет")}
 📍 Адрес доставки: ${escapeMarkdown(deliveryDetails.address || "Самовывоз")}
 💳 Способ оплаты: ${escapeMarkdown(paymentMethodText)}
@@ -1477,36 +1464,15 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         const orderId = result.insertId;
         
-        // Отправляем в Telegram МОМЕНТАЛЬНО с retry и увеличенными таймаутами
-        // Используем async/await для надежной отправки через мобильный интернет
-        (async () => {
-          try {
-            const result = await sendTelegramMessage(chatId, orderText);
-            if (result.success) {
-              // Отправка успешна, возвращаем ответ клиенту
-              res.status(200).json({ 
-                message: 'Заказ успешно отправлен', 
-                orderId: orderId,
-                cashbackEarned: cashbackEarned
-              });
-            } else {
-              // Обработка ошибок
-              if (result.errorCode === 403) {
-                return res.status(500).json({
-                  error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
-                });
-              }
-              return res.status(500).json({ 
-                error: `Ошибка отправки в Telegram после ${3} попыток: ${result.error}` 
-              });
-            }
-          } catch (error) {
-            console.error('Критическая ошибка при отправке в Telegram:', error);
-            return res.status(500).json({ 
-              error: `Критическая ошибка отправки в Telegram: ${error.message}` 
-            });
-          }
-        })();
+        // СРАЗУ возвращаем ответ клиенту (не ждем Telegram)
+        res.status(200).json({ 
+          message: 'Заказ успешно отправлен', 
+          orderId: orderId,
+          cashbackEarned: cashbackEarned
+        });
+        
+        // Отправляем в Telegram МОМЕНТАЛЬНО и АСИНХРОННО (не блокируем ответ)
+        sendTelegramMessageAsync(chatId, orderText);
         
         // Обрабатываем кешбэк параллельно (не блокируем отправку в Telegram)
         // Обновляем order_id в транзакциях кешбэка
@@ -3295,11 +3261,16 @@ app.delete('/subcategories/:id', authenticateToken, (req, res) => {
 
 app.post('/products', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, sauceIds } = req.body;
     if (!req.file) return res.status(400).json({ error: 'Изображение обязательно' });
     uploadToS3(req.file, (err, imageKey) => {
-      if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+      if (err) {
+        console.error('Ошибка загрузки в S3:', err);
+        return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+      }
       if (!name || !branchId || !categoryId || !imageKey) {
         return res.status(400).json({ error: 'Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)' });
       }
@@ -3400,7 +3371,9 @@ app.post('/products', authenticateToken, (req, res) => {
 
 app.put('/products/:id', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { id } = req.params;
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, sauceIds } = req.body;
     let imageKey;
@@ -3409,7 +3382,10 @@ app.put('/products/:id', authenticateToken, (req, res) => {
       if (existing.length === 0) return res.status(404).json({ error: 'Продукт не найден' });
       if (req.file) {
         uploadToS3(req.file, (err, key) => {
-          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          if (err) {
+            console.error('Ошибка загрузки в S3:', err);
+            return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+          }
           imageKey = key;
           if (existing[0].image) deleteFromS3(existing[0].image, updateProduct);
           else updateProduct();
@@ -3637,11 +3613,16 @@ app.delete('/discounts/:id', authenticateToken, (req, res) => {
 
 app.post('/banners', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { title, description, button_text, promo_code_id } = req.body;
     if (!req.file) return res.status(400).json({ error: 'Изображение обязательно' });
     uploadToS3(req.file, (err, imageKey) => {
-      if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+      if (err) {
+        console.error('Ошибка загрузки в S3:', err);
+        return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+      }
       if (promo_code_id) {
         db.query('SELECT id FROM promo_codes WHERE id = ?', [promo_code_id], (err, promo) => {
           if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
@@ -3680,7 +3661,9 @@ app.post('/banners', authenticateToken, (req, res) => {
 
 app.put('/banners/:id', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { id } = req.params;
     const { title, description, button_text, promo_code_id } = req.body;
     let imageKey;
@@ -3689,7 +3672,10 @@ app.put('/banners/:id', authenticateToken, (req, res) => {
       if (existing.length === 0) return res.status(404).json({ error: 'Баннер не найден' });
       if (req.file) {
         uploadToS3(req.file, (err, key) => {
-          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          if (err) {
+            console.error('Ошибка загрузки в S3:', err);
+            return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+          }
           imageKey = key;
           if (existing[0].image) deleteFromS3(existing[0].image, updateBanner);
           else updateBanner();
@@ -3754,10 +3740,15 @@ app.delete('/banners/:id', authenticateToken, (req, res) => {
 
 app.post('/stories', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     if (!req.file) return res.status(400).json({ error: 'Изображение обязательно' });
     uploadToS3(req.file, (err, imageKey) => {
-      if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+      if (err) {
+        console.error('Ошибка загрузки в S3:', err);
+        return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+      }
       db.query('INSERT INTO stories (image) VALUES (?)', [imageKey], (err, result) => {
         if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         res.status(201).json({
@@ -3788,13 +3779,18 @@ app.delete('/stories/:id', authenticateToken, (req, res) => {
 
 app.post('/sauces', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { name, price } = req.body;
     let imageKey = null;
     if (!name || !price) return res.status(400).json({ error: 'Название и цена обязательны' });
     if (req.file) {
       uploadToS3(req.file, (err, key) => {
-        if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+        if (err) {
+          console.error('Ошибка загрузки в S3:', err);
+          return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+        }
         imageKey = key;
         insertSauce();
       });
@@ -3822,7 +3818,9 @@ app.post('/sauces', authenticateToken, (req, res) => {
 
 app.put('/sauces/:id', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { id } = req.params;
     const { name, price } = req.body;
     let imageKey;
@@ -3832,7 +3830,10 @@ app.put('/sauces/:id', authenticateToken, (req, res) => {
       if (existing.length === 0) return res.status(404).json({ error: 'Соус не найден' });
       if (req.file) {
         uploadToS3(req.file, (err, key) => {
-          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          if (err) {
+            console.error('Ошибка загрузки в S3:', err);
+            return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+          }
           imageKey = key;
           if (existing[0].image) deleteFromS3(existing[0].image, updateSauce);
           else updateSauce();
@@ -3986,7 +3987,9 @@ app.get('/news', authenticateToken, (req, res) => {
 
 app.post('/news', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { title, content } = req.body;
     if (!title || !content) {
       return res.status(400).json({ error: 'Заголовок и содержание обязательны' });
@@ -4012,7 +4015,10 @@ app.post('/news', authenticateToken, (req, res) => {
 
     if (req.file) {
       uploadToS3(req.file, (err, key) => {
-        if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+        if (err) {
+          console.error('Ошибка загрузки в S3:', err);
+          return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+        }
         handleInsert(key);
       });
     } else {
@@ -4023,7 +4029,9 @@ app.post('/news', authenticateToken, (req, res) => {
 
 app.put('/news/:id', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { id } = req.params;
     const { title, content } = req.body;
     if (!title || !content) {
@@ -4037,7 +4045,10 @@ app.put('/news/:id', authenticateToken, (req, res) => {
       let imageKey = existing[0].image;
       if (req.file) {
         uploadToS3(req.file, (err, key) => {
-          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          if (err) {
+            console.error('Ошибка загрузки в S3:', err);
+            return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+          }
           imageKey = key;
           if (existing[0].image) deleteFromS3(existing[0].image, updateNews);
           else updateNews();
@@ -4151,7 +4162,9 @@ app.get('/promotions', authenticateToken, (req, res) => {
 
 app.post('/promotions', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { title, description, promo_code_id, send_notification } = req.body;
     if (!title || !description) {
       return res.status(400).json({ error: 'Заголовок и описание обязательны' });
@@ -4196,7 +4209,10 @@ app.post('/promotions', authenticateToken, (req, res) => {
 
     if (req.file) {
       uploadToS3(req.file, (err, key) => {
-        if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+        if (err) {
+          console.error('Ошибка загрузки в S3:', err);
+          return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+        }
         handleInsert(key);
       });
     } else {
@@ -4207,7 +4223,9 @@ app.post('/promotions', authenticateToken, (req, res) => {
 
 app.put('/promotions/:id', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
-    if (err) return res.status(400).json({ error: `Ошибка загрузки изображения: ${err.message}` });
+    if (err) {
+      return handleUploadError(err, req, res, () => {});
+    }
     const { id } = req.params;
     const { title, description, promo_code_id } = req.body;
     if (!title || !description) {
@@ -4221,7 +4239,10 @@ app.put('/promotions/:id', authenticateToken, (req, res) => {
       let imageKey = existing[0].image;
       if (req.file) {
         uploadToS3(req.file, (err, key) => {
-          if (err) return res.status(500).json({ error: `Ошибка загрузки в S3: ${err.message}` });
+          if (err) {
+            console.error('Ошибка загрузки в S3:', err);
+            return res.status(500).json({ error: err.message || 'Ошибка загрузки файла на сервер' });
+          }
           imageKey = key;
           if (existing[0].image) deleteFromS3(existing[0].image, updatePromotion);
           else updatePromotion();
