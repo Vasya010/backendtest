@@ -12,7 +12,10 @@ require('dotenv').config();
 
 const app = express();
 
-// Middleware для логирования всех запросов
+app.use(cors());
+app.use(express.json());
+
+// Middleware для логирования всех запросов (после парсинга body)
 app.use((req, res, next) => {
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
@@ -20,12 +23,29 @@ app.use((req, res, next) => {
   // Логируем входящий запрос
   console.log(`\n📥 [${timestamp}] ${req.method} ${req.path}`);
   console.log(`   IP: ${req.ip || req.connection.remoteAddress}`);
-  if (Object.keys(req.query).length > 0) {
-    console.log(`   Query:`, req.query);
+  
+  // Безопасная проверка query параметров
+  try {
+    if (req.query && typeof req.query === 'object' && Object.keys(req.query).length > 0) {
+      console.log(`   Query:`, req.query);
+    }
+  } catch (e) {
+    // Игнорируем ошибки при логировании query
   }
-  if (Object.keys(req.body).length > 0 && req.path !== '/api/public/send-order') {
-    // Не логируем полное тело заказа (слишком большое), только для других запросов
-    console.log(`   Body:`, JSON.stringify(req.body).substring(0, 200));
+  
+  // Безопасная проверка body
+  try {
+    if (req.body && typeof req.body === 'object' && !Array.isArray(req.body) && Object.keys(req.body).length > 0 && req.path !== '/api/public/send-order') {
+      // Не логируем полное тело заказа (слишком большое), только для других запросов
+      try {
+        const bodyStr = JSON.stringify(req.body);
+        console.log(`   Body:`, bodyStr.substring(0, 200));
+      } catch (e) {
+        console.log(`   Body: [не удалось сериализовать]`);
+      }
+    }
+  } catch (e) {
+    // Игнорируем ошибки при логировании body
   }
   
   // Перехватываем ответ для логирования
@@ -50,9 +70,6 @@ app.use((req, res, next) => {
   
   next();
 });
-
-app.use(cors());
-app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key_very_secure_random_string';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7639223015:AAGdo2oB_uL4pEqXTnnepR4IpwsTSh2_UyY';
