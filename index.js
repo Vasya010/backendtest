@@ -1885,8 +1885,8 @@ app.post('/api/public/auth/verify-code', (req, res) => {
           const referrerId = referrer.id;
           const referrerPhone = referrer.phone;
           
-          // Начисляем бонус рефереру (например, 100 сом)
-          const referralBonus = 100;
+          // Начисляем бонус рефереру (10 сом)
+          const referralBonus = 10;
           db.query(
             `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
              VALUES (?, ?, ?, 0, 'bronze')
@@ -1986,11 +1986,23 @@ app.post('/api/public/auth/verify-code', (req, res) => {
   });
 });
 
+// Health check endpoint (для проверки доступности сервера)
+app.get('/api/public/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Сервер работает',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // API для получения user_code пользователя
 app.get('/api/public/user-code', authenticateToken, (req, res) => {
   const userId = req.user.id;
   db.query('SELECT user_code FROM app_users WHERE id = ?', [userId], (err, users) => {
-    if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    if (err) {
+      console.error('Ошибка получения user_code:', err);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
     if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
     
     let userCode = users[0].user_code;
@@ -1998,7 +2010,10 @@ app.get('/api/public/user-code', authenticateToken, (req, res) => {
     if (!userCode) {
       userCode = generateUserCode();
       db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, userId], (err) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        if (err) {
+          console.error('Ошибка обновления user_code:', err);
+          return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        }
       });
     }
     
@@ -2289,8 +2304,8 @@ app.post('/api/public/auth/phone', (req, res) => {
           const referrerId = referrer.id;
           const referrerPhone = referrer.phone;
           
-          // Начисляем бонус рефереру (например, 100 сом)
-          const referralBonus = 100;
+          // Начисляем бонус рефереру (10 сом)
+          const referralBonus = 10;
           db.query(
             `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
              VALUES (?, ?, ?, 0, 'bronze')
