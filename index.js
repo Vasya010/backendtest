@@ -11,6 +11,46 @@ const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
+
+// Middleware для логирования всех запросов
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  const timestamp = new Date().toISOString();
+  
+  // Логируем входящий запрос
+  console.log(`\n📥 [${timestamp}] ${req.method} ${req.path}`);
+  console.log(`   IP: ${req.ip || req.connection.remoteAddress}`);
+  if (Object.keys(req.query).length > 0) {
+    console.log(`   Query:`, req.query);
+  }
+  if (Object.keys(req.body).length > 0 && req.path !== '/api/public/send-order') {
+    // Не логируем полное тело заказа (слишком большое), только для других запросов
+    console.log(`   Body:`, JSON.stringify(req.body).substring(0, 200));
+  }
+  
+  // Перехватываем ответ для логирования
+  const originalSend = res.send;
+  res.send = function(data) {
+    const duration = Date.now() - startTime;
+    const statusEmoji = res.statusCode >= 400 ? '❌' : res.statusCode >= 300 ? '⚠️' : '✅';
+    console.log(`${statusEmoji} [${timestamp}] ${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
+    
+    // Логируем ошибки подробнее
+    if (res.statusCode >= 400) {
+      try {
+        const errorData = typeof data === 'string' ? JSON.parse(data) : data;
+        console.log(`   Error:`, errorData.error || errorData.message || data);
+      } catch (e) {
+        console.log(`   Error:`, data?.substring?.(0, 200) || data);
+      }
+    }
+    
+    return originalSend.call(this, data);
+  };
+  
+  next();
+});
+
 app.use(cors());
 app.use(express.json());
 
@@ -227,19 +267,44 @@ const db = mysql.createPool({
 
 // Обработка ошибок подключения к БД
 db.on('error', (err) => {
-  console.error('❌ Ошибка подключения к MySQL:', err);
+  const timestamp = new Date().toISOString();
+  console.error(`\n❌ [${timestamp}] Ошибка подключения к MySQL:`, err);
   if (err.code === 'PROTOCOL_CONNECTION_LOST') {
-    console.log('🔄 Переподключение к MySQL...');
+    console.log(`🔄 [${timestamp}] Переподключение к MySQL...`);
   } else {
     throw err;
   }
 });
 
+// Логирование подключений к БД
+db.on('connection', (connection) => {
+  const timestamp = new Date().toISOString();
+  console.log(`🔌 [${timestamp}] Новое подключение к MySQL (ID: ${connection.threadId})`);
+});
+
+db.on('acquire', (connection) => {
+  const timestamp = new Date().toISOString();
+  console.log(`📊 [${timestamp}] Получено подключение из пула (ID: ${connection.threadId})`);
+});
+
+db.on('release', (connection) => {
+  const timestamp = new Date().toISOString();
+  console.log(`🔄 [${timestamp}] Подключение возвращено в пул (ID: ${connection.threadId})`);
+});
+
 function authenticateToken(req, res, next) {
   const token = req.headers['authorization']?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Токен отсутствует' });
+  const timestamp = new Date().toISOString();
+  if (!token) {
+    console.log(`🔒 [${timestamp}] Попытка доступа без токена: ${req.method} ${req.path}`);
+    return res.status(401).json({ error: 'Токен отсутствует' });
+  }
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Недействительный токен' });
+    if (err) {
+      console.log(`❌ [${timestamp}] Недействительный токен: ${req.method} ${req.path}`);
+      return res.status(403).json({ error: 'Недействительный токен' });
+    }
+    console.log(`✅ [${timestamp}] Аутентификация успешна: User ID ${user.id}, ${req.method} ${req.path}`);
     req.user = user;
     next();
   });
@@ -997,7 +1062,8 @@ app.get('/api/public/branches/:branchId/products', (req, res) => {
     GROUP BY p.id
   `, queryParams, (err, products) => {
     if (err) {
-      console.error('Ошибка получения продуктов:', err);
+      const timestamp = new Date().toISOString();
+      console.error(`❌ [${timestamp}] Ошибка получения продуктов для филиала ${branchId}:`, err.message);
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
     
@@ -1461,8 +1527,14 @@ ${cashbackEarned > 0 ? `✨ Кешбэк начислен: +${cashbackEarned.toF
         cashbackUsedAmount,
       ],
       (err, result) => {
-        if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        const timestamp = new Date().toISOString();
+        if (err) {
+          console.error(`❌ [${timestamp}] Ошибка создания заказа:`, err.message);
+          return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        }
         const orderId = result.insertId;
+        
+        console.log(`📦 [${timestamp}] Новый заказ создан: ID ${orderId}, Филиал: ${branchName}, Сумма: ${finalTotal} сом, Телефон: ${phone}`);
         
         // СРАЗУ возвращаем ответ клиенту (не ждем Telegram)
         res.status(200).json({ 
@@ -1887,6 +1959,7 @@ app.post('/api/public/auth/verify-code', (req, res) => {
           
           // Начисляем бонус рефереру (10 сом)
           const referralBonus = 10;
+          const timestamp = new Date().toISOString();
           db.query(
             `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
              VALUES (?, ?, ?, 0, 'bronze')
@@ -1896,7 +1969,7 @@ app.post('/api/public/auth/verify-code', (req, res) => {
             [referrerPhone, referralBonus, referralBonus, referralBonus, referralBonus],
             (err) => {
               if (err) {
-                console.error('Ошибка начисления бонуса рефереру:', err);
+                console.error(`❌ [${timestamp}] Ошибка начисления бонуса рефереру ${referrerPhone}:`, err.message);
               } else {
                 // Записываем транзакцию
                 db.query(
@@ -1904,7 +1977,7 @@ app.post('/api/public/auth/verify-code', (req, res) => {
                   [referrerPhone, referralBonus, `Бонус за приглашение пользователя`],
                   () => {}
                 );
-                console.log(`Начислен бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение`);
+                console.log(`💰 [${timestamp}] Начислен реферальный бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение пользователя ${cleanPhone}`);
               }
               callback(referrerId);
             }
@@ -1922,7 +1995,13 @@ app.post('/api/public/auth/verify-code', (req, res) => {
           : [cleanPhone, userCode];
         
         db.query(insertQuery, insertParams, (err, result) => {
-          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          const timestamp = new Date().toISOString();
+          if (err) {
+            console.error(`❌ [${timestamp}] Ошибка регистрации пользователя ${cleanPhone}:`, err.message);
+            return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          }
+          
+          console.log(`✅ [${timestamp}] Новый пользователь зарегистрирован: ${cleanPhone}, ID: ${result.insertId}, Код: ${userCode}${referrerId ? `, Реферер ID: ${referrerId}` : ''}`);
           
           // Если пользователь зарегистрировался по реферальному коду, начисляем ему бонус
           if (referrerId) {
@@ -1936,7 +2015,7 @@ app.post('/api/public/auth/verify-code', (req, res) => {
               [cleanPhone, newUserBonus, newUserBonus, newUserBonus, newUserBonus],
               (err) => {
                 if (err) {
-                  console.error('Ошибка начисления бонуса новому пользователю:', err);
+                  console.error(`❌ [${timestamp}] Ошибка начисления бонуса новому пользователю ${cleanPhone}:`, err.message);
                 } else {
                   // Записываем транзакцию
                   db.query(
@@ -1944,7 +2023,7 @@ app.post('/api/public/auth/verify-code', (req, res) => {
                     [cleanPhone, newUserBonus, `Бонус за регистрацию по реферальному коду`],
                     () => {}
                   );
-                  console.log(`Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
+                  console.log(`💰 [${timestamp}] Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
                 }
                 
                 const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
@@ -1968,20 +2047,46 @@ app.post('/api/public/auth/verify-code', (req, res) => {
     } else {
       // Вход существующего пользователя
       const user = users[0];
-      // Если у пользователя нет кода, генерируем его
+      const timestamp = new Date().toISOString();
+      
+      // Если у пользователя нет кода, генерируем его и ОБЯЗАТЕЛЬНО ждем сохранения
       if (!user.user_code) {
         const userCode = generateUserCode();
+        console.log(`🔑 [${timestamp}] Генерация user_code для существующего пользователя ${user.phone}: ${userCode}`);
+        
         db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, user.id], (err) => {
-          if (err) console.error('Error updating user_code:', err);
+          if (err) {
+            console.error(`❌ [${timestamp}] Ошибка обновления user_code для пользователя ${user.id}:`, err.message);
+            // Все равно возвращаем ответ, но без кода (он будет сгенерирован при следующем запросе)
+            const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+            return res.json({ 
+              token, 
+              user: { id: user.id, phone: user.phone, name: user.name, user_code: null },
+              isNewUser: false
+            });
+          }
+          
+          console.log(`✅ [${timestamp}] user_code успешно сохранен для пользователя ${user.phone}: ${userCode}`);
+          user.user_code = userCode;
+          
+          console.log(`✅ [${timestamp}] Пользователь авторизован: ${user.phone}, ID: ${user.id}, Код: ${userCode}`);
+          const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+          res.json({ 
+            token, 
+            user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
+            isNewUser: false
+          });
         });
-        user.user_code = userCode;
+      } else {
+        // Код уже есть, сразу возвращаем
+        console.log(`✅ [${timestamp}] Пользователь авторизован: ${user.phone}, ID: ${user.id}, Код: ${user.user_code}`);
+        const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ 
+          token, 
+          user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
+          isNewUser: false
+        });
       }
-      const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
-      res.json({ 
-        token, 
-        user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
-        isNewUser: false
-      });
     }
   });
 });
@@ -1998,26 +2103,82 @@ app.get('/api/public/health', (req, res) => {
 // API для получения user_code пользователя
 app.get('/api/public/user-code', authenticateToken, (req, res) => {
   const userId = req.user.id;
+  const timestamp = new Date().toISOString();
+  
+  // Функция для генерации уникального кода
+  const generateUniqueUserCode = (callback, maxAttempts = 10) => {
+    let attempts = 0;
+    
+    const tryGenerate = () => {
+      attempts++;
+      const userCode = generateUserCode();
+      
+      // Проверяем уникальность кода
+      db.query('SELECT id FROM app_users WHERE user_code = ?', [userCode], (err, existing) => {
+        if (err) {
+          console.error(`❌ [${timestamp}] Ошибка проверки уникальности кода:`, err.message);
+          return callback(err, null);
+        }
+        
+        if (existing.length > 0) {
+          // Код уже существует, пробуем снова
+          if (attempts < maxAttempts) {
+            console.log(`⚠️ [${timestamp}] Код ${userCode} уже существует, генерируем новый (попытка ${attempts}/${maxAttempts})`);
+            return tryGenerate();
+          } else {
+            console.error(`❌ [${timestamp}] Не удалось сгенерировать уникальный код после ${maxAttempts} попыток`);
+            return callback(new Error('Не удалось сгенерировать уникальный код'), null);
+          }
+        }
+        
+        // Код уникален, возвращаем его
+        callback(null, userCode);
+      });
+    };
+    
+    tryGenerate();
+  };
+  
   db.query('SELECT user_code FROM app_users WHERE id = ?', [userId], (err, users) => {
     if (err) {
-      console.error('Ошибка получения user_code:', err);
+      console.error(`❌ [${timestamp}] Ошибка получения user_code для пользователя ${userId}:`, err.message);
       return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
     }
-    if (users.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
-    
-    let userCode = users[0].user_code;
-    // Если у пользователя нет кода, генерируем его
-    if (!userCode) {
-      userCode = generateUserCode();
-      db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, userId], (err) => {
-        if (err) {
-          console.error('Ошибка обновления user_code:', err);
-          return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-        }
-      });
+    if (users.length === 0) {
+      console.error(`❌ [${timestamp}] Пользователь ${userId} не найден`);
+      return res.status(404).json({ error: 'Пользователь не найден' });
     }
     
-    res.json({ user_code: userCode });
+    let userCode = users[0].user_code;
+    
+    // Если у пользователя нет кода, генерируем уникальный и ОБЯЗАТЕЛЬНО ждем сохранения
+    if (!userCode) {
+      console.log(`🔑 [${timestamp}] Генерация user_code для пользователя ${userId}`);
+      
+      generateUniqueUserCode((err, newUserCode) => {
+        if (err) {
+          console.error(`❌ [${timestamp}] Ошибка генерации уникального кода для пользователя ${userId}:`, err.message);
+          return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+        }
+        
+        userCode = newUserCode;
+        console.log(`🔑 [${timestamp}] Сгенерирован уникальный user_code для пользователя ${userId}: ${userCode}`);
+        
+        db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, userId], (err) => {
+          if (err) {
+            console.error(`❌ [${timestamp}] Ошибка обновления user_code для пользователя ${userId}:`, err.message);
+            return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          }
+          
+          console.log(`✅ [${timestamp}] user_code успешно сохранен для пользователя ${userId}: ${userCode}`);
+          res.json({ user_code: userCode });
+        });
+      });
+    } else {
+      // Код уже есть, сразу возвращаем
+      console.log(`✅ [${timestamp}] user_code получен для пользователя ${userId}: ${userCode}`);
+      res.json({ user_code: userCode });
+    }
   });
 });
 
@@ -2306,6 +2467,7 @@ app.post('/api/public/auth/phone', (req, res) => {
           
           // Начисляем бонус рефереру (10 сом)
           const referralBonus = 10;
+          const timestamp = new Date().toISOString();
           db.query(
             `INSERT INTO cashback_balance (phone, balance, total_earned, total_orders, user_level)
              VALUES (?, ?, ?, 0, 'bronze')
@@ -2315,7 +2477,7 @@ app.post('/api/public/auth/phone', (req, res) => {
             [referrerPhone, referralBonus, referralBonus, referralBonus, referralBonus],
             (err) => {
               if (err) {
-                console.error('Ошибка начисления бонуса рефереру:', err);
+                console.error(`❌ [${timestamp}] Ошибка начисления бонуса рефереру ${referrerPhone}:`, err.message);
               } else {
                 // Записываем транзакцию
                 db.query(
@@ -2323,7 +2485,7 @@ app.post('/api/public/auth/phone', (req, res) => {
                   [referrerPhone, referralBonus, `Бонус за приглашение пользователя`],
                   () => {}
                 );
-                console.log(`Начислен бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение`);
+                console.log(`💰 [${timestamp}] Начислен реферальный бонус ${referralBonus} сом рефереру ${referrerPhone} за приглашение пользователя ${cleanPhone}`);
               }
               callback(referrerId);
             }
@@ -2341,7 +2503,13 @@ app.post('/api/public/auth/phone', (req, res) => {
           : [cleanPhone, userCode];
         
         db.query(insertQuery, insertParams, (err, result) => {
-          if (err) return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          const timestamp = new Date().toISOString();
+          if (err) {
+            console.error(`❌ [${timestamp}] Ошибка регистрации пользователя ${cleanPhone}:`, err.message);
+            return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+          }
+          
+          console.log(`✅ [${timestamp}] Новый пользователь зарегистрирован: ${cleanPhone}, ID: ${result.insertId}, Код: ${userCode}${referrerId ? `, Реферер ID: ${referrerId}` : ''}`);
           
           // Если пользователь зарегистрировался по реферальному коду, начисляем ему бонус
           if (referrerId) {
@@ -2355,7 +2523,7 @@ app.post('/api/public/auth/phone', (req, res) => {
               [cleanPhone, newUserBonus, newUserBonus, newUserBonus, newUserBonus],
               (err) => {
                 if (err) {
-                  console.error('Ошибка начисления бонуса новому пользователю:', err);
+                  console.error(`❌ [${timestamp}] Ошибка начисления бонуса новому пользователю ${cleanPhone}:`, err.message);
                 } else {
                   // Записываем транзакцию
                   db.query(
@@ -2363,7 +2531,7 @@ app.post('/api/public/auth/phone', (req, res) => {
                     [cleanPhone, newUserBonus, `Бонус за регистрацию по реферальному коду`],
                     () => {}
                   );
-                  console.log(`Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
+                  console.log(`💰 [${timestamp}] Начислен бонус ${newUserBonus} сом новому пользователю ${cleanPhone} за регистрацию по реферальному коду`);
                 }
                 
                 const token = jwt.sign({ id: result.insertId, phone: cleanPhone }, JWT_SECRET, { expiresIn: '30d' });
@@ -2387,20 +2555,46 @@ app.post('/api/public/auth/phone', (req, res) => {
     } else {
       // Вход существующего пользователя
       const user = users[0];
-      // Если у пользователя нет кода, генерируем его
+      const timestamp = new Date().toISOString();
+      
+      // Если у пользователя нет кода, генерируем его и ОБЯЗАТЕЛЬНО ждем сохранения
       if (!user.user_code) {
         const userCode = generateUserCode();
+        console.log(`🔑 [${timestamp}] Генерация user_code для существующего пользователя ${user.phone}: ${userCode}`);
+        
         db.query('UPDATE app_users SET user_code = ? WHERE id = ?', [userCode, user.id], (err) => {
-          if (err) console.error('Error updating user_code:', err);
+          if (err) {
+            console.error(`❌ [${timestamp}] Ошибка обновления user_code для пользователя ${user.id}:`, err.message);
+            // Все равно возвращаем ответ, но без кода (он будет сгенерирован при следующем запросе)
+            const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+            return res.json({ 
+              token, 
+              user: { id: user.id, phone: user.phone, name: user.name, user_code: null },
+              isNewUser: false
+            });
+          }
+          
+          console.log(`✅ [${timestamp}] user_code успешно сохранен для пользователя ${user.phone}: ${userCode}`);
+          user.user_code = userCode;
+          
+          console.log(`✅ [${timestamp}] Пользователь авторизован: ${user.phone}, ID: ${user.id}, Код: ${userCode}`);
+          const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+          res.json({ 
+            token, 
+            user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
+            isNewUser: false
+          });
         });
-        user.user_code = userCode;
+      } else {
+        // Код уже есть, сразу возвращаем
+        console.log(`✅ [${timestamp}] Пользователь авторизован: ${user.phone}, ID: ${user.id}, Код: ${user.user_code}`);
+        const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ 
+          token, 
+          user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
+          isNewUser: false
+        });
       }
-      const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '30d' });
-      res.json({ 
-        token, 
-        user: { id: user.id, phone: user.phone, name: user.name, user_code: user.user_code },
-        isNewUser: false
-      });
     }
   });
 });
@@ -4395,9 +4589,11 @@ initializeServer((err) => {
   }
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
-    console.log(`✅ Сервер запущен на порту ${PORT}`);
-    console.log(`🌐 API доступен по адресу: http://localhost:${PORT}`);
-    console.log(`📡 Публичные endpoints:`);
+    const timestamp = new Date().toISOString();
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`🚀 [${timestamp}] Сервер запущен на порту ${PORT}`);
+    console.log(`🌐 [${timestamp}] API доступен по адресу: http://localhost:${PORT}`);
+    console.log(`📡 [${timestamp}] Публичные endpoints:`);
     console.log(`   - GET  /api/public/branches`);
     console.log(`   - GET  /api/public/branches/:branchId/products`);
     console.log(`   - GET  /api/public/sauces (с фильтрацией: search, sort, order, limit, offset, branchId)`);
@@ -4416,6 +4612,14 @@ initializeServer((err) => {
   });
   
   process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Необработанный rejection:', reason);
+    const timestamp = new Date().toISOString();
+    console.error(`\n❌ [${timestamp}] Необработанный rejection:`, reason);
+    console.error(`   Promise:`, promise);
+  });
+  
+  process.on('uncaughtException', (error) => {
+    const timestamp = new Date().toISOString();
+    console.error(`\n❌ [${timestamp}] Необработанное исключение:`, error);
+    console.error(`   Stack:`, error.stack);
   });
 });
